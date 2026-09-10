@@ -1658,8 +1658,12 @@ Subprocess lifecycle:
     returns `None` without consulting the service. An unreadable config answers
     "kiro" so the latch keeps governing — fail closed toward the gate. The two
     spawn sites do **not** rely on that `None`: each tests the membership itself
-    and never resolves kiro-cli for a foreign harness (`/api/models` answers
-    `model_list_backend_unsupported` 503; `/api/sessions/usage` publishes the
+    and never resolves kiro-cli for a foreign harness (`/api/models` serves an
+    `ACP_BACKENDS_ADVERTISED_MODEL_SELECTION` member — codex, opencode, pi,
+    goose, deepseek — the list its own adapter advertised, `auto` first, through
+    `_advertised_backend_models`, and answers `model_list_backend_unsupported`
+    503 only for a selected backend with neither an advertised selection nor a
+    kiro-cli sign-in; `/api/sessions/usage` publishes the
     `{"available": false}` marker that hides the credit pill), because kiro-cli
     may still be installed and signed out on that host and the browser storm is
     what the spawn does whatever backend the sessions use.
