@@ -2891,7 +2891,7 @@ export const warmSlotCache = createAsyncThunk(
 
 export const createSlot = createAsyncThunk<
   ChatSlot,
-  { agent?: string; model?: string; mode?: string; memory_mode?: string; folder_id?: string | null; title?: string; color_index?: number | null; color_hex?: string | null; project?: string | null; activate?: boolean; instanceId?: string } | string | undefined,
+  { agent?: string; model?: string; mode?: string; memory_mode?: string; folder_id?: string | null; title?: string; color_index?: number | null; color_hex?: string | null; project?: string | null; activate?: boolean; instanceId?: string; acp_backend?: string } | string | undefined,
   { fulfilledMeta: { originActiveSlot: string | null; activate: boolean } }
 >(
   'chat/createSlot',
@@ -2914,6 +2914,10 @@ export const createSlot = createAsyncThunk<
     // creates the local one, so a failure leaves nothing behind — patching later
     // would put a session in the sidebar that looks ready and refuses every send.
     const instanceId = typeof opts === 'string' ? undefined : opts?.instanceId
+    // The per-session agent backend. Sent at birth like `instanceId`: the harness
+    // is fixed when the slot is created (a session keeps the one it started on),
+    // so there is no later PATCH to carry it. `undefined` = follow the global.
+    const acpBackend = typeof opts === 'string' ? undefined : opts?.acp_backend
     // `activate: false` creates the session WITHOUT stealing focus, so a caller
     // that must finish setting the slot up (e.g. scoping it to a worktree) can
     // do so before the user is able to type into it. Defaults to true — every
@@ -2929,7 +2933,7 @@ export const createSlot = createAsyncThunk<
     // entry points resolve the persisted preference here, before the first turn
     // can read or write memory.
     const memory_mode = requestedMemoryMode || await configuredDefaultMemoryMode()
-    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, title, undefined, folderId || undefined, instanceId)
+    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, title, undefined, folderId || undefined, instanceId, acpBackend)
     const dashState = (getState() as RootState).dashboard
     // An explicit color (e.g. carried from a slot being recreated on a
     // mode switch) wins; otherwise fall back to the default-color policy.

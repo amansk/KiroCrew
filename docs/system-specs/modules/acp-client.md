@@ -631,7 +631,8 @@ sessions retain their existing behavior.
 
 The public provider factory uses `agent.member_acp_backend` for member private
 chat and the configured default backend for Crew work and private background
-consolidation. Each effective backend must support direct MCP. Selecting a
+consolidation; a dashboard slot created with an explicit `acp_backend` (see
+[session](session.md)) outranks both, through the same one gate. Each effective backend must support direct MCP. Selecting a
 supported member-chat backend alone does not change a Codex default used by
 background work.
 

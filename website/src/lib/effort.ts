@@ -70,6 +70,19 @@ export const REASONING_EFFORT_PROVIDERS = new Set(['acp'])
  * Keep this in sync with the backend allowlist — it is a conservative list of
  * known-capable families, not a "non-Claude means unsupported" denylist.
  */
+/** Whether a slot may pick an effort for `model`, given the picker's rows.
+ *
+ *  A row that carries `effortLevels` is authoritative: that list came from the
+ *  backend (a live session's effort selector), so the name heuristic below is
+ *  consulted only for a model no row describes. `auto` never takes an effort:
+ *  the backend picks both. */
+export function modelEffortCapable(models: ReadonlyArray<{ name: string; effortLevels?: string[] }>, model: string | undefined): boolean {
+  if (!model || model === 'auto') return false
+  const row = models.find(m => m.name === model)
+  if (row && Array.isArray(row.effortLevels)) return row.effortLevels.length > 0
+  return modelSupportsEffort(model)
+}
+
 export function modelSupportsEffort(model: string | undefined): boolean {
   if (!model) return false
   const m = model.toLowerCase()

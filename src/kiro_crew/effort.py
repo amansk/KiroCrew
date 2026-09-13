@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from typing import Iterable
 
 from kiro_crew import model_registry
 
@@ -41,6 +43,54 @@ EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 # Accepted by the API/persistence layer: the concrete levels plus the empty
 # sentinel for "provider default".  Single source for ``_REASONING_EFFORT_VALUES``.
 EFFORT_VALUES: frozenset[str] = frozenset({""} | set(EFFORT_LEVELS))
+
+# A bracket suffix that names a CONTEXT WINDOW (``[1m]``, ``[200k]``) rather than
+# an effort level. Kept as the one shape test so ``split_effort_model_id`` can
+# never read a window spelling as a level, whatever the level vocabulary grows to.
+_WINDOW_SUFFIX_RE = re.compile(r"^\d+[km]$")
+_BRACKET_SUFFIX_RE = re.compile(r"^(?P<base>.+?)\[(?P<suffix>[^\[\]]+)\]$")
+
+
+def split_effort_model_id(model_id: str) -> tuple[str, str | None]:
+    """Split ``<base>[<effort>]`` into its base id and effort level.
+
+    codex-acp's ``models`` envelope advertises one composite id per (model,
+    effort) pair — ``gpt-6-astra[high]`` — where its ``model`` config option
+    names the base alone and ``reasoning_effort`` the level. A suffix that is a
+    window spelling (``opus[1m]``) is NOT an effort and is returned unsplit, so
+    the kiro/claude namespaces never lose their ``[1m]`` variants; any other
+    bracketed word is treated as a level, deliberately without a vocabulary
+    check, because the adapter's own list is the authority on which levels
+    exist (``ultra`` predates this module's ``EFFORT_LEVELS`` knowing it).
+    """
+    if not model_id:
+        return model_id, None
+    m = _BRACKET_SUFFIX_RE.match(model_id)
+    if not m:
+        return model_id, None
+    suffix = m.group("suffix").strip().lower()
+    if not suffix or _WINDOW_SUFFIX_RE.match(suffix) or not suffix.isalpha():
+        return model_id, None
+    return m.group("base"), suffix
+
+
+def collapse_effort_variants(model_ids: Iterable[str]) -> list[tuple[str, list[str]]]:
+    """Collapse ``<base>[<effort>]`` ids into ``(base, [levels])`` rows.
+
+    Order is the advertised order of first appearance, for bases and for levels
+    alike, so the picker reads in the adapter's own order. An id with no effort
+    suffix is its own row with an empty level list, and a window-suffixed id
+    (``[1m]``) is left as its own row untouched.
+    """
+    rows: dict[str, list[str]] = {}
+    for model_id in model_ids:
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        base, level = split_effort_model_id(model_id)
+        levels = rows.setdefault(base, [])
+        if level and level not in levels:
+            levels.append(level)
+    return [(base, list(levels)) for base, levels in rows.items()]
 
 
 def is_valid_effort(level: object) -> bool:

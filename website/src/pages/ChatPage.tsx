@@ -247,6 +247,8 @@ import {
 import WelcomeView from '../components/WelcomeView'
 import { openPanelView, claimAppAutoOpen } from '../hooks/usePanelTabs'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
+import { useSlotAcpBackend } from '../hooks/useAcpBackendChoices'
+import { AcpBackendDropdown } from '../components/AcpBackendDropdown'
 import { useAvailableModels } from '../hooks/useAvailableModels'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAgents } from '../hooks/useAgents'
@@ -271,7 +273,7 @@ import ChatDropOverlay from '../components/ChatDropOverlay'
 import SessionGridView from '../components/SessionGridView'
 import SessionTabStrip from '../components/SessionTabStrip'
 import { anchorForSlot, loadLayout, sessionSlots } from '../hooks/splitLayoutStore'
-import { modelSupportsEffort } from '../lib/effort'
+import { modelEffortCapable } from '../lib/effort'
 import { countCompletedTurns } from '../lib/completedTurns'
 import { displayModel, pinIsWithheld } from '../lib/model'
 import FollowUpCard from '../components/FollowUpCard'
@@ -881,7 +883,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   }, [dispatch])
   const { open: agentDropdown, setOpen: setAgentDropdown, filter: agentFilter, setFilter: setAgentFilter, dropdownRef: agentDropdownRef, inputRef: agentInputRef, filtered: filteredAgentsByName } = useFilteredDropdown(effectiveAgents)
   const filteredAgents = filteredAgentsByName
-  const localModels = useAvailableModels()
+  // The slot's own harness decides which model list the picker offers: a
+  // per-session pick fetches that backend's list (`/api/models?backend=`).
+  // `currentSlot` is derived further down; the pick is read straight off the
+  // store here so the model query keys on it from the first render.
+  const slotBackend = useSlotAcpBackend(slots.find(s => s.key === activeSlot)?.acp_backend)
+  const localModels = useAvailableModels({ backend: slotBackend.backendParam })
   // A peer-bound session's shelf must offer the PEER's rosters. Both hooks above
   // read THIS machine same-origin, so a remote session left on them would list
   // crews and models that do not exist over there — accepted by the picker, then
@@ -956,6 +963,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // short-circuits `slot.model or agent_model` and would override a template or
   // global pin the user did configure.
   const [modelBtnRect, setModelBtnRect] = useState<DOMRect | null>(null)
+  const [backendBtnRect, setBackendBtnRect] = useState<DOMRect | null>(null)
+  const [backendDropdown, setBackendDropdown] = useState(false)
   // One in-page slot for every failed action whose only report used to be a
   // notification-centre toast, a native alert() or a swallowed catch (fork,
   // plan-from-here, apply-plan, steer, rename, title generation, the agent
@@ -2908,6 +2917,25 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // or drill into the reasoning-effort panel. Dismiss is via outside-click/Escape.
     // setPendingModel is a stable useState setter.
   }, [activeSlot, dispatch, setPendingModel])
+  const switchBackend = useCallback(async (value: string | null) => {
+    if (!activeSlot) return
+    try {
+      // Same protocol as switchModel above. The server clears the slot's model
+      // pin with the switch (it belonged to the old harness), so the store
+      // write carries both fields from the one authoritative answer.
+      await performSlotSwitch('backend', activeSlot, value ?? '',
+        async () => {
+          const r = await api.chatSlotBackend(activeSlot, value)
+          dispatch(updateSlot({ key: activeSlot, model: r?.model ?? '' }))
+          return r?.acp_backend ?? value
+        },
+        (picked) => dispatch(updateSlot({ key: activeSlot, acp_backend: picked })))
+    } catch (e) {
+      dispatch(setAgentSwitchNotice(agentSwitchFailureMessage(e)))
+      // eslint-disable-next-line no-console -- surface switchBackend failures for debugging
+      console.error('switchBackend failed', e)
+    }
+  }, [activeSlot, dispatch])
   const setProject = useCallback(async (path: string) => {
     if (!activeSlot) { setPendingProject(path); return }
     try {
@@ -7304,6 +7332,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               agentIsInheritedDefault={!currentSlot?.agent && !!effectiveDefaultAgent}
               agentSource={effectiveAgents.find(a => a.name === activeAgentName)?.source}
               modelName={shownModel}
+              backendLabel={slotBackend.label}
+              backendIsInheritedDefault={!slotBackend.isPick}
+              onBackendClick={activeSlot ? (rect) => { setBackendBtnRect(rect); setBackendDropdown(!backendDropdown) } : undefined}
               // The served default is shown exactly when the pin alone would
               // have read `auto`; that is the inherited case the marker names.
               modelIsInheritedDefault={shownModel !== 'auto' && shownModel !== _pinShownModel}
@@ -7390,7 +7421,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               approvalMode={displayMode}
               providerId={provider.id}
               reasoningEffort={effectiveEffort}
-              onReasoningEffortClick={provider.capabilities.reasoningEffort && modelSupportsEffort(shownModel === 'auto' ? '' : shownModel) ? (rect) => { setReasoningEffortBtnRect(rect); setReasoningEffortDropdown(!reasoningEffortDropdown) } : undefined}
+              onReasoningEffortClick={provider.capabilities.reasoningEffort && modelEffortCapable(availableModels, shownModel) ? (rect) => { setReasoningEffortBtnRect(rect); setReasoningEffortDropdown(!reasoningEffortDropdown) } : undefined}
               onAutomationClick={setAutomationOpen}
               automation={automation}
               automationOpen={automationOpen}
@@ -7459,6 +7490,15 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               </Composer>
             </div>
             {/* Agent dropdown portal — triggered from input bar */}
+            {backendDropdown && backendBtnRect && createPortal(
+              <AcpBackendDropdown
+                anchorRect={backendBtnRect}
+                effective={slotBackend.effective}
+                onSelect={value => { void switchBackend(value) }}
+                onClose={() => setBackendDropdown(false)}
+              />,
+              document.body
+            )}
             {agentDropdown && agentBtnRect && createPortal(
               // The keydown handler routes arrow/Enter navigation to the inner
               // role="listbox"; the dialog is a focus container (tabIndex={-1}),
@@ -7493,7 +7533,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 filter={modelFilter}
                 setFilter={setModelFilter}
                 onClose={() => setModelDropdown(false)}
-                hasEffort={!!(activeSlot && provider.capabilities.reasoningEffort && modelSupportsEffort(shownModel === 'auto' ? '' : shownModel))}
+                hasEffort={!!(activeSlot && provider.capabilities.reasoningEffort && modelEffortCapable(availableModels, shownModel))}
                 slot={activeSlot}
                 currentEffort={currentSlot?.reasoning_effort || ''}
                 defaultEffort={defaultEffort}
@@ -7567,7 +7607,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               )
             })()}
             {/* Reasoning effort dropdown portal */}
-            {reasoningEffortDropdown && reasoningEffortBtnRect && activeSlot && provider.capabilities.reasoningEffort && modelSupportsEffort(shownModel === 'auto' ? '' : shownModel) && createPortal(
+            {reasoningEffortDropdown && reasoningEffortBtnRect && activeSlot && provider.capabilities.reasoningEffort && modelEffortCapable(availableModels, shownModel) && createPortal(
               <div ref={reasoningEffortDropdownRef} className="fixed z-[9999] animate-slide-up" style={(() => { const left = Math.max(8, Math.min(reasoningEffortBtnRect.left, window.innerWidth - 220)); return { bottom: window.innerHeight - reasoningEffortBtnRect.top + 4, left: isMobile ? 8 : left, ...(isMobile ? { right: 8, maxWidth: 'calc(100vw - 16px)' } : {}) } })()}>
                 <ReasoningEffortDropdown slot={activeSlot} currentEffort={currentSlot?.reasoning_effort || ''} defaultEffort={defaultEffort} levelsOverride={remoteCrew.isRemote ? (remoteCrew.capabilities?.effort_levels ?? []) : undefined} onClose={() => setReasoningEffortDropdown(false)} />
               </div>,

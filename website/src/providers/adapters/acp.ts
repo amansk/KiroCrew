@@ -66,10 +66,16 @@ interface CachedModels {
  *  expired (older than the TTL), or unusable. Fully guarded: SSR (no
  *  localStorage), disabled storage, quota, and corrupt JSON all degrade to null
  *  so the caller falls through to auto-only. */
-function readCachedModels(): ModelInfo[] | null {
+/** One cache entry per harness: a per-session pick reads its own backend's
+ *  last-good list, never the configured backend's ids (which it may refuse). */
+function modelsCacheKey(backend?: string): string {
+  return backend === undefined ? MODELS_CACHE_KEY : MODELS_CACHE_KEY + ':' + backend
+}
+
+function readCachedModels(backend?: string): ModelInfo[] | null {
   try {
     if (typeof localStorage === 'undefined') return null
-    const raw = localStorage.getItem(MODELS_CACHE_KEY)
+    const raw = localStorage.getItem(modelsCacheKey(backend))
     if (!raw) return null
     const parsed = JSON.parse(raw) as CachedModels
     if (!parsed || typeof parsed.ts !== 'number' || !Array.isArray(parsed.models)) return null
@@ -115,11 +121,11 @@ export function clearCachedModels(): void {
 
 /** Persist a live model list with a timestamp. Best-effort — storage errors
  *  (quota, disabled, SSR) are swallowed so caching never breaks the picker. */
-function writeCachedModels(models: ModelInfo[]): void {
+function writeCachedModels(models: ModelInfo[], backend?: string): void {
   try {
     if (typeof localStorage === 'undefined') return
     const payload: CachedModels = { ts: Date.now(), models }
-    localStorage.setItem(MODELS_CACHE_KEY, JSON.stringify(payload))
+    localStorage.setItem(modelsCacheKey(backend), JSON.stringify(payload))
   } catch {
     /* quota exceeded / storage disabled — non-fatal */
   }
@@ -160,6 +166,7 @@ interface RawModel {
    *  predating either field still works (we fall back to the map). */
   context_window?: number
   context_window_tokens?: number
+  effort_levels?: string[]
   /** Relative credit cost of a turn on this model, Auto = 1.0. Optional: a
    *  gateway/kiro-cli predating the field simply omits it, and we render no
    *  badge rather than inventing a price (see ModelInfo.rateMultiplier). */
@@ -370,14 +377,14 @@ export class AcpAdapter implements ProviderAdapter {
     return { ok: false as const, error: 'plugin update is not supported' }
   }
 
-  async fetchAvailableModels(): Promise<ModelInfo[]> {
+  async fetchAvailableModels(backend?: string): Promise<ModelInfo[]> {
     try {
-      const models = await api.models()
+      const models = await api.models(backend)
       if (!Array.isArray(models) || models.length === 0) {
         // Empty/non-array success: NOT a live list — keep polling, serve the
         // last-good live list if we have one, else auto-only.
         markModelsDegraded(this.id, true)
-        return readCachedModels() ?? this._defaultModels()
+        return readCachedModels(backend) ?? this._defaultModels()
       }
       const result = models.map((m: RawModel) => {
         // Prefer the backend's resolved window over the bundled snapshot: the
@@ -392,9 +399,15 @@ export class AcpAdapter implements ProviderAdapter {
           description: m.description || '',
           contextWindow: reported || MODEL_TOKENS[m.model_name] || DEFAULT_CONTEXT,
           rateMultiplier: rowMultiplier(m),
+          // A NON-EMPTY list is the backend's own answer; an empty one means no
+          // session has reported yet, and is dropped so the name heuristic
+          // still answers for the flagship models on a cold dashboard.
+          ...(Array.isArray(m.effort_levels) && m.effort_levels.length > 0
+            ? { effortLevels: m.effort_levels.map(String) }
+            : {}),
         }
       })
-      writeCachedModels(result) // remember this good live list for next hiccup
+      writeCachedModels(result, backend) // remember this good live list for next hiccup
       markModelsDegraded(this.id, false) // live success → self-heal can stop polling
       return result
     } catch {
@@ -402,7 +415,7 @@ export class AcpAdapter implements ProviderAdapter {
       // Serve the last-good live list if we have one, else auto-only. Never
       // surface canonical registry keys — the ACP CLI rejects them (-32603).
       markModelsDegraded(this.id, true)
-      return readCachedModels() ?? this._defaultModels()
+      return readCachedModels(backend) ?? this._defaultModels()
     }
   }
 

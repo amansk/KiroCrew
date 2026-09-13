@@ -4961,6 +4961,10 @@ async def _spawn_admitted_prefetch(
             speculative=True,
             speculative_resume=allow_resume,
             reasoning_effort_override=slot.reasoning_effort or None,
+            # The slot's per-session harness pick (None = follow the global),
+            # reaching the factory's optional kwarg through extra_factory_kwargs
+            # and decided by the ONE selection gate there (H3/H13).
+            acp_backend=slot.acp_backend,
         )
     except SpeculativeResumeRefused:
         # Two sources: the entry gate (resumable key, resume not
@@ -7488,6 +7492,10 @@ async def _run_chat(
             model=slot.model or agent_model or default_model or None,
             cwd=slot.project or None,
             reasoning_effort_override=slot.reasoning_effort or None,
+            # The slot's per-session harness pick (None = follow the global),
+            # reaching the factory's optional kwarg through extra_factory_kwargs
+            # and decided by the ONE selection gate there (H3/H13).
+            acp_backend=slot.acp_backend,
         )
         _acquired = True
         # A member DM's first turn carries the four-layer member section as

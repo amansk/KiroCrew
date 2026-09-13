@@ -3413,6 +3413,7 @@ class _ChatSlot:
         "title",
         "agent",
         "model",
+        "acp_backend",
         "_model_withheld",
         "_model_withheld_for",
         "served_model",
@@ -3592,11 +3593,19 @@ class _ChatSlot:
         mode: str = "",
         memory_mode: str = "persistent",
         ephemeral: bool = False,
+        acp_backend: str | None = None,
     ) -> None:
         self.key = key
         self.title = title or key
         self.agent = agent
         self.model = model
+        # The ACP harness this slot was created for, or None when the slot made
+        # no pick and follows ``agent.acp_backend`` like every slot did before
+        # the picker existed. Fixed at creation: a session keeps the harness it
+        # started on, so there is no writer after ``__init__`` besides restore
+        # and fork. "" is a real pick (Kiro CLI), distinct from None. Read by
+        # the factory through the ONE selection gate (H3/H13), never here.
+        self.acp_backend: str | None = acp_backend
         # Spawn-time withhold verdict for `model`, and the model id it was
         # computed for. Read through the `model_withheld` property, never these
         # two directly: the pairing is what makes the verdict self-invalidating
@@ -6729,6 +6738,7 @@ class DashboardState:
         channel_origin: bool = False,
         origin: str | None = None,
         *,
+        acp_backend: str | None = None,
         # Opt-in for the survey's "new user" session counter, DISTINCT from the
         # origin tag: ``SlotOrigin.USER`` carries the ``slots:user`` privacy
         # semantics and is deliberately set by non-human paths too (the
@@ -6773,6 +6783,7 @@ class DashboardState:
             model=model,
             mode=mode,
             memory_mode=memory_mode or "persistent",
+            acp_backend=acp_backend,
         )
         if requested_name and requested_name != name:
             # The caller asked for a human-readable name (e.g. "Artifact: My

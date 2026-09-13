@@ -3096,7 +3096,10 @@ export const api = {
       body: form,
     }).then(j) as Promise<{ ok?: boolean; staged?: boolean; token?: string; error?: string }>
   },
-  models: () => fetch('/api/models').then(j),
+  /** `backend` names a per-session harness (`slot.acp_backend`); omitted, the
+   *  configured backend answers — see `GET /api/models?backend=`. */
+  models: (backend?: string) =>
+    fetch('/api/models' + (backend !== undefined ? '?backend=' + encodeURIComponent(backend) : '')).then(j),
   effortLevels: (slot?: string) =>
     fetch('/api/effort-levels' + (slot ? '?slot=' + encodeURIComponent(slot) : '')).then(j) as Promise<string[]>,
   // Bounded HERE, not per initiator: react-query dedupes on the key, so the
@@ -3106,6 +3109,11 @@ export const api = {
       fetch('/api/slash-commands', { signal: s }).then(j)),
   chatSlotAgent: (slot: string, agent: string) =>
     post('/api/chat/slots/' + encodeURIComponent(slot) + '/agent', { agent }).then(j) as Promise<{ ok?: boolean; agent?: string; workspace?: string }>,
+  /** This slot's per-session agent backend (`null` = follow the global). A
+   *  live session is reset by the server; `model` in the answer is the slot's
+   *  pin after the switch (cleared: it belonged to the old harness). */
+  chatSlotBackend: (slot: string, acp_backend: string | null) =>
+    post('/api/chat/slots/' + encodeURIComponent(slot) + '/backend', { acp_backend }).then(j) as Promise<{ ok?: boolean; acp_backend?: string | null; model?: string; warning?: string }>,
   chatSlotModel: (slot: string, model: string) =>
     post('/api/chat/slots/' + encodeURIComponent(slot) + '/model', { model }).then(j) as Promise<{ ok?: boolean; model?: string }>,
   /** This slot's auto-compact threshold override (null = follows the global). */
@@ -3583,7 +3591,7 @@ export const api = {
    *  over there. The backend opens the peer's slot first, so a peer that is
    *  disconnected or on a different version fails the create rather than yielding
    *  a session that cannot send. */
-  createChatSlot: async (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, artifact?: string, folder_id?: string, instance_id?: string) => {
+  createChatSlot: async (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, artifact?: string, folder_id?: string, instance_id?: string, acp_backend?: string) => {
     const resolvedMemoryMode = memory_mode ?? await resolveDefaultMemoryMode(
       () => fetch('/api/dashboard/config').then(j),
     )
@@ -3597,6 +3605,9 @@ export const api = {
       ...(artifact ? { artifact } : {}),
       ...(folder_id ? { folder_id } : {}),
       ...(instance_id ? { instance_id } : {}),
+      // `''` is Kiro CLI, a real pick, so the check is on undefined rather than
+      // truthiness: sending nothing means "follow the global agent.acp_backend".
+      ...(acp_backend !== undefined ? { acp_backend } : {}),
     }).then(j) as Promise<ChatSlot>
   },
   /** Inject silent background context into a slot — consumed on the next user

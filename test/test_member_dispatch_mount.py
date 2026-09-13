@@ -416,6 +416,57 @@ class TestSelectProviderBackend:
 
         assert select_provider_backend(MEMBER_KEY, "no-such-backend", "") == ""
 
+    def test_explicit_pick_wins_over_the_configured_default(self):
+        from kiro_crew.acp_backends import ACP_BACKEND_CLAUDE, ACP_BACKEND_CODEX
+        from kiro_crew.members import select_provider_backend
+
+        assert (
+            select_provider_backend(
+                "dashboard_abc", "kas", ACP_BACKEND_CLAUDE, explicit=ACP_BACKEND_CODEX
+            )
+            == ACP_BACKEND_CODEX
+        )
+
+    def test_explicit_pick_wins_over_the_member_route(self):
+        from kiro_crew.acp_backends import ACP_BACKEND_CLAUDE
+        from kiro_crew.members import select_provider_backend
+
+        assert (
+            select_provider_backend(MEMBER_KEY, "kas", "", explicit=ACP_BACKEND_CLAUDE)
+            == ACP_BACKEND_CLAUDE
+        )
+
+    def test_explicit_kiro_is_a_real_pick(self):
+        """ "" is Kiro CLI, not "unset": it must beat a non-kiro default."""
+        from kiro_crew.acp_backends import ACP_BACKEND_CLAUDE, ACP_BACKEND_KIRO
+        from kiro_crew.members import select_provider_backend
+
+        assert (
+            select_provider_backend(
+                "dashboard_abc", "kas", ACP_BACKEND_CLAUDE, explicit=ACP_BACKEND_KIRO
+            )
+            == ACP_BACKEND_KIRO
+        )
+
+    def test_denied_explicit_pick_degrades_to_kiro_and_logs(self, caplog):
+        """The explicit arm crosses the ONE gate (H3): unknown -> kiro, with a reason."""
+        import logging
+
+        from kiro_crew.members import select_provider_backend
+
+        with caplog.at_level(logging.INFO, logger="kiro_crew.members"):
+            assert (
+                select_provider_backend("dashboard_abc", "kas", "", explicit="no-such-backend")
+                == ""
+            )
+        assert "explicit per-session pick" in caplog.text
+
+    def test_no_explicit_pick_keeps_the_two_arm_behaviour(self):
+        from kiro_crew.members import select_provider_backend
+
+        assert select_provider_backend(MEMBER_KEY, "kas", "", explicit=None) == "kas"
+        assert select_provider_backend("dashboard_abc", "kas", "", explicit=None) == ""
+
 
 class TestSessionHistoryWriteProtected:
     """created_by feeds authorize_target, so its storage must not be

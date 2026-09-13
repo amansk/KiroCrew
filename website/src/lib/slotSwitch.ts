@@ -87,6 +87,8 @@ export interface SlotSwitchValueMap {
   project: string
   agent: AgentSwitchValue
   reasoning_effort: string
+  /** The slot's agent-backend pick; `null` = follows the global. */
+  backend: string | null
 }
 
 export type SlotSwitchField = keyof SlotSwitchValueMap

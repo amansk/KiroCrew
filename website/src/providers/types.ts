@@ -114,6 +114,11 @@ export interface ModelInfo {
   name: string
   description: string
   contextWindow?: number
+  /** Effort levels this model takes, from `GET /api/models` `effort_levels`
+   *  (a live session's advertised effort selector, or the levels a backend's
+   *  `<base>[<effort>]` variants spelled out). Absent on a gateway that does
+   *  not send it, or when no session has reported any yet. */
+  effortLevels?: string[]
   supportsExtendedContext?: boolean
   /**
    * Relative credit cost of a turn on this model, with Auto as the 1.0
@@ -165,7 +170,9 @@ export interface ProviderAdapter {
   uninstallPlugin(pkg: string, type: 'agent' | 'skill' | 'mcp'): Promise<{ ok: boolean; error?: string }>
   updatePlugins(type: 'agent' | 'skill' | 'mcp'): Promise<{ ok: boolean; output?: string; error?: string }>
 
-  fetchAvailableModels(): Promise<ModelInfo[]>
+  /** `backend` scopes the list to one harness (a slot's per-session pick);
+   *  omitted, the configured backend's list. */
+  fetchAvailableModels(backend?: string): Promise<ModelInfo[]>
   getContextWindow(model: string): number
   getDefaultModel(): string
   getPermissionModes(): PermissionMode[]

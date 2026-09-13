@@ -5736,7 +5736,10 @@
       "session_control_ready": "準備完了",
       "session_control_chip_label": "{{label}} — {{detail}}",
       "agent_inherited_default": "このセッションはデフォルトエージェント（{{name}}）に従います。独自のエージェントを持たないため、デフォルトが変わると変わります。固定するにはクリックしてください。",
-      "model_inherited_default": "このセッションはデフォルトモデル（{{name}}）で動作します。独自のモデルを持たないため、デフォルトが変わると変わります。固定するにはクリックしてください。"
+      "model_inherited_default": "このセッションはデフォルトモデル（{{name}}）で動作します。独自のモデルを持たないため、デフォルトが変わると変わります。固定するにはクリックしてください。",
+      "backend": "エージェントバックエンド：{{name}}",
+      "backend_inherited_default": "このセッションはデフォルトのエージェントバックエンド（{{name}}）で動作します。独自のバックエンドを持たないため、デフォルトが変わると変わります。固定するにはクリックしてください。",
+      "stop_the_current_response_to_switch_backend": "現在の応答を停止してエージェントバックエンドを切り替え"
     },
     "chatPane": {
       "agent_list": "エージェントリスト",

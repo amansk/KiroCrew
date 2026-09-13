@@ -155,6 +155,7 @@ from kiro_crew.agent import (
     require_fork_governance,
 )
 from kiro_crew.agent_sdk import host_auth
+from kiro_crew.agent_sdk.backends import effort_option_id_for
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.browser_cli.launch import browser_session_env, browser_socket_env
 from kiro_crew.config.paths import kiro_sessions_dir
@@ -164,6 +165,7 @@ from kiro_crew.constants import (
     KIROCREW_SPAWNED_VALUE,
 )
 from kiro_crew.credential_errors import is_credential_propagation_delay
+from kiro_crew.effort import split_effort_model_id
 from kiro_crew.env import (
     augmented_path,
     describe_search_path,
@@ -5107,14 +5109,31 @@ class AcpClient:
         window lookup.
         """
         models = session_resp.get("models")
-        if not isinstance(models, dict):
-            # Adapters that omit `models` still advertise via configOptions.
-            models = self._models_from_config_options(session_resp)
-            if models is None:
-                return
-        current_model_id = models.get("currentModelId")
+        # The served id is the ``models`` envelope's, so it is read BEFORE the
+        # select may replace the list below: codex-acp's envelope names the
+        # composite it runs (``gpt-6-astra[high]``) while its ``model`` select
+        # names the base alone, and ``served_model`` must stay the truthful one.
+        current_model_id = models.get("currentModelId") if isinstance(models, dict) else None
         if isinstance(current_model_id, str) and current_model_id:
             self._resolved_model_id = current_model_id
+        # A ``model`` config option WINS over the envelope for the backends that
+        # take a model over ``session/set_config_option``: its values are, by
+        # definition, the ids that call accepts back. codex-acp's envelope instead
+        # lists one ``<base>[<effort>]`` composite per (model, effort) pair --
+        # which pushed as a model id folds the effort choice into the model
+        # picker and hides its own ``reasoning_effort`` select.
+        from_select = self._models_from_config_options(session_resp)
+        if from_select is not None and self.backend in ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION:
+            models = from_select
+        if not isinstance(models, dict):
+            # Adapters that omit `models` still advertise via configOptions.
+            models = from_select
+            if models is None:
+                return
+        if self._resolved_model_id is None or not self._resolved_model_id:
+            current_model_id = models.get("currentModelId")
+            if isinstance(current_model_id, str) and current_model_id:
+                self._resolved_model_id = current_model_id
         # Imported lazily: acp.session_handle imports this module at module
         # level, so a top-level import here would be a cycle.
         from kiro_crew.acp.session_handle import parse_advertised_models
@@ -5232,6 +5251,12 @@ class AcpClient:
         bare = stripped.replace("[1m]", "")
         if bare != stripped:
             out.append(bare)
+        # A ``<base>[<effort>]`` composite persisted from an envelope-shaped
+        # capture: the select accepts the base, and the level travels on its own
+        # option (``effort_option_id_for``), so the base is the last spelling.
+        base, level = split_effort_model_id(bare)
+        if level and base not in out:
+            out.append(base)
         return out
 
     async def _push_model_config_option(self, model_id: str, *, strict: bool) -> str:
@@ -5608,6 +5633,10 @@ class AcpClient:
     def supports_config_option(self, config_id: str) -> bool:
         """Whether the session advertised a config option with this id.
 
+        ``"effort"`` is read as THIS backend's effort selector
+        (:func:`effort_option_id_for`: claude spells it ``effort``, codex
+        ``reasoning_effort``), so every caller keeps the one spelling.
+
         Older claude-agent-acp builds do not expose an ``effort`` selector at
         all; pushing ``session/set_config_option`` for it then fails with
         ``Unknown config option`` (a -32603 Internal error, distinct from a
@@ -5618,6 +5647,8 @@ class AcpClient:
         backend which advertises options lazily (after the first turn) is not
         permanently treated as unsupported.
         """
+        if config_id == "effort":
+            config_id = effort_option_id_for(self.backend)
         if not self._acp_config_options:
             return True
         return any(
@@ -5630,10 +5661,11 @@ class AcpClient:
         Parses configOptions for the entry with id="effort" and extracts its
         options[].value list in the order ACP reported them.
         """
+        effort_id = effort_option_id_for(self.backend)
         for opt in self._acp_config_options:
             if not isinstance(opt, dict):
                 continue
-            if opt.get("id") == "effort":
+            if opt.get("id") == effort_id:
                 options = opt.get("options", [])
                 if isinstance(options, list):
                     return [o["value"] for o in options if isinstance(o, dict) and "value" in o]

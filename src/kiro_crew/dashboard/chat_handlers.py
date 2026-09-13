@@ -25,6 +25,7 @@ from aiohttp.client_exceptions import ClientConnectionResetError
 from kiro_crew import members as members_mod
 from kiro_crew import model_registry
 from kiro_crew.acp.client import AcpModelUnavailable
+from kiro_crew.acp_backends import selectable_backend_values
 from kiro_crew.agent_discovery import cached_project_agent_names, warm_project_agent_names
 from kiro_crew.agent_sdk.capabilities import MODEL_NAMESPACE_ACP, capabilities_of
 from kiro_crew.agent_sdk.provider_identity import is_claude_code
@@ -2369,6 +2370,18 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         name = str(name)
     agent = body.get("agent", "")
     model = body.get("model", "")
+    # Per-session harness pick. Absent/None = follow ``agent.acp_backend`` (the
+    # only behaviour before the picker). Validation is MEMBERSHIP in the live
+    # selectable list -- the same values ``GET /api/config/schema`` renders and
+    # ``PATCH /api/config/kirocrew`` accepts -- not a second selectability
+    # derivation (H4): the spawn still crosses the ONE gate, which is what
+    # degrades a pick this build stops serving after a restart.
+    acp_backend = body.get("acp_backend")
+    if acp_backend is not None:
+        if not isinstance(acp_backend, str) or acp_backend not in selectable_backend_values():
+            return web.json_response(
+                {"error": "invalid acp_backend", "code": "invalid_acp_backend"}, status=400
+            )
     # Folder membership at BIRTH. Assigning it afterwards (client PATCH) is
     # visibly too late: get_or_create_slot broadcasts the new slot before this
     # handler returns, so the dashboard renders it at the top level for a frame
@@ -2652,6 +2665,7 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                 # Human request-layer path: the dashboard new-chat tab. The
                 # origin conjunct in state.py still excludes app-token callers.
                 count_user_session=True,
+                acp_backend=acp_backend,
             )
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=409)
@@ -8255,6 +8269,142 @@ async def api_chat_slot_workspace(request: web.Request) -> web.Response:
         # carries the committed state (agent-handler precedent).
         ws_resp["warning"] = _TEARDOWN_INCOMPLETE_WARNING
     return web.json_response(ws_resp)
+
+
+async def api_chat_slot_backend(request: web.Request) -> web.Response:
+    """POST /api/chat/slots/{slot}/backend — set the per-session agent backend.
+
+    Body ``{"acp_backend": "<id>" | null}``; ``null`` clears the pick so the slot
+    follows the global ``agent.acp_backend`` again, and ``""`` is a real pick
+    (Kiro CLI). Validated exactly as ``POST /api/chat/slots`` validates it: by
+    membership in the live ``selectable_backend_values()`` — the list
+    ``GET /api/config/schema`` renders — never a second derivation of
+    selectability (governance: one gate). The pick is an INPUT to that gate at
+    the next spawn (``members.select_provider_backend``, H3); this handler only
+    records it.
+
+    A live session keeps the harness it started on, so the switch resets the
+    slot's session the way the workspace switch does (commit, then
+    ``_reset_slot_session_or_warn``): the next turn spawns on the new backend
+    with the slot's transcript re-injected. The slot's ``model`` pin is cleared
+    with it — a model id belongs to the namespace of the harness that served
+    it, and carrying one across (``gpt-…`` onto claude, a canonical key onto
+    codex) is exactly the unrepresentable pin that fails the next spawn. A
+    running turn answers 409 ``turn_in_flight`` like every other switch.
+    """
+    state: DashboardState = request.app["state"]
+    name = request.match_info["slot"]
+    slot = state._slots.get(name)
+    if not slot:
+        return web.json_response({"error": "not found", "code": "not_found"}, status=404)
+    denied = _deny_cross_app_slot_access(request, slot, name, "slot_backend")
+    if denied is not None:
+        return denied
+    body, body_err = await read_bounded_json(request)
+    if body_err is not None:
+        return body_err
+    assert body is not None  # read_bounded_json returns (dict, None) on success
+    if "acp_backend" not in body:
+        return web.json_response(
+            {"error": "acp_backend is required", "code": "invalid_acp_backend"}, status=400
+        )
+    acp_backend = body.get("acp_backend")
+    if acp_backend is not None and (
+        not isinstance(acp_backend, str) or acp_backend not in selectable_backend_values()
+    ):
+        return web.json_response(
+            {"error": "invalid acp_backend", "code": "invalid_acp_backend"}, status=400
+        )
+    if slot.mode == members_mod.DM_SLOT_MODE:
+        # A member DM thread is routed by ``agent.member_acp_backend`` (the
+        # gate's second arm); a per-slot pick would override the crew's own
+        # binding. Refused before any state is touched, like the agent pin.
+        return web.json_response(
+            {"error": "member thread backend is pinned", "code": "member_thread_backend_pinned"},
+            status=409,
+        )
+    if slot.is_remote:
+        # The pick names a harness on THIS machine; a crew-bound session runs
+        # on the peer, whose own default is the point of it running there.
+        return web.json_response(
+            {"error": "a crew-bound session runs on its peer", "code": "remote_slot_backend"},
+            status=409,
+        )
+    async with contextlib.AsyncExitStack() as _stack:
+        await _stack.enter_async_context(slot._lock)
+        session_key = effective_session_key(slot)
+        await _stack.enter_async_context(_slot_switch_session_lock(session_key))
+        denied = _app_cancel_denied(request, slot, "chat.slot_backend", session_key)
+        if denied is not None:
+            return denied
+        if slot.acp_backend == acp_backend:
+            return web.json_response({"ok": True, "acp_backend": acp_backend, "model": slot.model})
+        children_409 = _subagents_attached_response(state, slot, session_key, "slot_backend")
+        if children_409 is not None:
+            return children_409
+        pre_provider = state.sessions.get_provider(session_key)
+        if slot.running or (
+            isinstance(pre_provider, LLMProvider) and pre_provider.has_active_turn()
+        ):
+            return web.json_response(
+                {"error": "a turn is in flight", "code": "turn_in_flight"}, status=409
+            )
+        prior_backend = slot.acp_backend
+        prior_model = slot.model
+        # Commit BEFORE the reset await (the workspace handler's reasoning): a
+        # send landing mid-reset cold-starts from the slot's CURRENT fields, so
+        # the new backend must already be visible or that session spawns on the
+        # old one and outlives the switch.
+        slot.acp_backend = acp_backend
+        slot.model = ""
+        logger.info("Slot %s backend switched to %r, resetting session", name, acp_backend)
+
+        def _rollback() -> None:
+            # Value compare-and-set under both locks (see the workspace
+            # handler): only unwind what this request wrote, then re-mark
+            # dirty so a flush that raced the reset reconverges to the prior.
+            if slot.acp_backend == acp_backend:
+                slot.acp_backend = prior_backend
+            if slot.model == "":
+                slot.model = prior_model
+            slot._dirty = True
+
+        teardown_incomplete = False
+        reset_ok = await _reset_slot_session_or_warn(
+            state, slot, session_key, switch_kind="backend"
+        )
+        if reset_ok is None:
+            teardown_incomplete = True
+        elif not reset_ok:
+            busy_provider = state.sessions.get_provider(session_key)
+            if isinstance(busy_provider, LLMProvider):
+                if busy_provider.has_active_turn():
+                    _rollback()
+                    return web.json_response(
+                        {"error": "a turn is in flight", "code": "turn_in_flight"}, status=409
+                    )
+                reset_ok = await _reset_slot_session_or_warn(
+                    state, slot, session_key, switch_kind="backend"
+                )
+                if reset_ok is None:
+                    teardown_incomplete = True
+                elif not reset_ok:
+                    _rollback()
+                    return web.json_response(
+                        {"error": "a turn is in flight", "code": "turn_in_flight"}, status=409
+                    )
+        if effective_session_key(slot) != session_key:
+            _rollback()
+            return web.json_response(
+                {"error": "slot session was rebound during the switch", "code": "session_rebound"},
+                status=409,
+            )
+        slot._dirty = True
+    state.push_slots_update()
+    resp: dict = {"ok": True, "acp_backend": acp_backend, "model": slot.model}
+    if teardown_incomplete:
+        resp["warning"] = _TEARDOWN_INCOMPLETE_WARNING
+    return web.json_response(resp)
 
 
 async def api_chat_slot_project(request: web.Request) -> web.Response:

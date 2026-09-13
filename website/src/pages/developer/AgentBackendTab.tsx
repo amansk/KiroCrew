@@ -1,40 +1,18 @@
 import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Bot, Boxes, Sparkles, Terminal } from 'lucide-react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 
 import { api } from '../../api/client'
-import type { AcpBackendProbe } from '../../api/client'
 import ErrorBoundary from '../../components/ErrorBoundary'
 import ErrorNotice from '../../components/ErrorNotice'
 import { SettingsCard, SettingsButtonGroup } from '../../components/settings'
-import { useConfigSchema } from '../../components/settingRef/useConfigSchema'
+import { ACP_BACKEND_CONFIG_KEY, CLAUDE, KIRO, useAcpBackendChoices } from '../../hooks/useAcpBackendChoices'
 import { i18nT } from '../../i18n/t'
 import { clearCachedModels } from '../../providers/adapters/acp'
 import { KiroSignInCard } from './KiroSignInCard'
 import { KIRO_SIGN_IN_BACKEND } from './kiroSignInLink'
 
 /** The config field the switch owns. Also the schema path the options are gated on. */
-const CONFIG_KEY = 'agent.acp_backend'
-
-/**
- * Backend ids, verbatim from `acp/types.py`. `''` (Kiro CLI) is the shipped
- * default and is a REAL value, not "unset" — the empty string is how the core
- * spells the Kiro backend, so it must round-trip as itself.
- */
-const KIRO = ''
-const CLAUDE = 'claude'
-const KAS = 'kas'
-
-/**
- * The agents this frontend has a translated name and an icon for.
- *
- * A FLOOR for what the panel renders, never a ceiling — see `candidates`. Every id
- * here is a core agent the server always knows, so listing them costs nothing and
- * keeps the control populated while the schema and probe queries are still in
- * flight. An agent absent from this list still gets a row once a server answer
- * names it, labelled with its `policy_id`.
- */
-const NAMED = [KIRO, CLAUDE, KAS]
+const CONFIG_KEY = ACP_BACKEND_CONFIG_KEY
 
 /**
  * DOM id of the row that states a backend's status.
@@ -45,16 +23,6 @@ const NAMED = [KIRO, CLAUDE, KAS]
  * bare separator.
  */
 const statusId = (value: string) => `agent-backend-status-${value || 'kiro'}`
-
-/**
- * Poll interval for the machine probe, in ms.
- *
- * Matched to `acp_backend_probe.CACHE_TTL_SECONDS` (30s) on purpose: the endpoint
- * serves that cache, so polling faster only adds requests that return the same
- * bytes, and polling slower leaves a just-installed harness disabled for longer than
- * the server would.
- */
-const PROBE_REFRESH_MS = 30_000
 
 /**
  * Developer > Agent Backend — pick which agent runs a session.
@@ -136,35 +104,21 @@ const PROBE_REFRESH_MS = 30_000
 export function AgentBackendTab() {
   const qc = useQueryClient()
   const [saveError, setSaveError] = useState('')
-  const schema = useConfigSchema()
-
-  const cfgQ = useQuery<{ agent?: { acp_backend?: string } }>({
-    queryKey: ['kirocrewConfig'],
-    queryFn: () => api.kirocrewConfig(),
-  })
-
-  /**
-   * The machine probe. `retry: false` because the two expected failures — 403 for a
-   * non-owner and 404 on a gateway that predates the endpoint — are permanent
-   * answers, and retrying them just delays the fail-open path this component
-   * already handles. A rejection is never surfaced as an error to the user: the
-   * absence of probe information is not something they can act on.
-   *
-   * `staleTime: 0` + `refetchInterval` are load-bearing, not tuning. This app sets a
-   * GLOBAL `staleTime: Infinity`, and inheriting it makes the probe answer permanent
-   * for the life of the page: an operator who follows the panel's own install
-   * instruction would leave the option disabled with no way to re-ask short of a
-   * reload. The interval matches the server probe's own TTL, so a poll can never be
-   * cheaper than the answer it re-reads, and the endpoint is a resolver read behind
-   * that TTL cache rather than a fresh shell-out per request.
-   */
-  const probeQ = useQuery<{ backends: AcpBackendProbe[] }>({
-    queryKey: ['acpBackends'],
-    queryFn: () => api.acpBackends(),
-    retry: false,
-    staleTime: 0,
-    refetchInterval: PROBE_REFRESH_MS,
-  })
+  // The one derivation of what is on offer, shared with the New Chat menu's
+  // per-session rows (`useAcpBackendChoices`): both controls read the same
+  // schema and probe answers, so they cannot disagree about which agents a
+  // session may run on.
+  const {
+    current,
+    currentLoading,
+    currentError,
+    refetchCurrent,
+    probe,
+    visible,
+    disabledOption,
+    nameOf,
+    iconOf,
+  } = useAcpBackendChoices()
 
   const patchMut = useMutation({
     mutationFn: (value: string) => api.patchConfig(CONFIG_KEY, value),
@@ -197,7 +151,7 @@ export function AgentBackendTab() {
     onError: () => setSaveError(i18nT('pages.developer.agentBackendTab.could_not_save_the_agent_backend')),
   })
 
-  if (cfgQ.isLoading) {
+  if (currentLoading) {
     return (
       <div className="text-muted text-sm py-12 text-center">
         {i18nT('pages.developer.agentBackendTab.loading_configuration')}
@@ -214,7 +168,7 @@ export function AgentBackendTab() {
    * operator running KAS is shown the wrong agent by a control that looks live.
    * Offer the retry instead of guessing.
    */
-  if (cfgQ.isError) {
+  if (currentError) {
     return (
       <div className="py-12 text-center">
         <div className="text-muted text-sm">
@@ -223,136 +177,13 @@ export function AgentBackendTab() {
         <button
           type="button"
           className="mt-3 text-[13px] px-3 py-[5px] rounded-md border border-border bg-bg-elevated text-text-strong cursor-pointer"
-          onClick={() => cfgQ.refetch()}
+          onClick={refetchCurrent}
         >
           {i18nT('pages.developer.agentBackendTab.retry')}
         </button>
       </div>
     )
   }
-
-  const current = cfgQ.data?.agent?.acp_backend ?? KIRO
-
-  /**
-   * `undefined` while the schema is in flight — every option stays enabled rather
-   * than flashing disabled and then live, which would read as a broken control on
-   * a slow load. The PATCH allowlist is the real gate either way, so an optimistic
-   * enable can only cost one visible refusal.
-   */
-  const selectable = schema?.get(CONFIG_KEY)?.enum
-
-  /**
-   * This machine's verdict for one backend, or `undefined` when there is none —
-   * query in flight, 403, 404, an outright failure, or a row the payload omits.
-   * Every caller below treats `undefined` as "say nothing, gate nothing".
-   */
-  const probe = (value: string): AcpBackendProbe | undefined =>
-    probeQ.data?.backends.find(b => b.id === value)
-
-  /**
-   * Not selectable = this build or the live policy will not serve it. Read from the
-   * schema first, since that is the set the PATCH validates against; the probe's own
-   * `selectable` is the same fact from the same source, so it is honoured too and the
-   * two cannot disagree in a way that lets a dead option look live. Both fall open
-   * when absent, so an in-flight query or a 403 hides nothing.
-   */
-  const unavailable = (value: string) =>
-    (selectable ? !selectable.includes(value) : false) || probe(value)?.selectable === false
-
-  /**
-   * Every agent id this panel could render, from the SERVER rather than a literal.
-   *
-   * This used to be `[KIRO, CLAUDE, KAS]`, which quietly made the panel the last
-   * hard-coded copy of the selectable list — the very thing
-   * `register_selectable_backend` exists to retire. Filtering a literal by the live
-   * schema narrows correctly but can never WIDEN, so an agent an edition registered
-   * was selectable on the wire, valid to PATCH, present in the probe payload, and
-   * absent from this control. The module note above already promised the opposite
-   * ("a build that ships another agent lights it up here with no frontend change");
-   * this is what makes that true.
-   *
-   * Union of the schema enum and the probe payload, because the two answer different
-   * questions and either can be in flight: the enum is what PATCH accepts, the probe
-   * is every id the core knows (including ones this build cannot select, which
-   * `unavailable` then drops).
-   *
-   * `NAMED` is unioned in as a FLOOR, not a ceiling, and the distinction is the whole
-   * fix. As a ceiling it capped the panel at three ids forever. As a floor it only
-   * guarantees the core agents still have rows when neither query has answered —
-   * which the loading behaviour requires, since hiding a row on absent information is
-   * the same mistake as disabling one. `current` joins for the same reason: the saved
-   * value must always have a chip.
-   *
-   * Sorted rather than left in arrival order: the two kiro-family harnesses first —
-   * KIRO because it is the default and the floor, then KAS — and everything else by
-   * `policy_id`, which is the order the probe endpoint already sorts by. Set iteration
-   * order would otherwise follow whichever query resolved first and reshuffle the
-   * control between renders.
-   */
-  const candidates = Array.from(
-    new Set<string>([
-      ...NAMED,
-      current,
-      ...(selectable ?? []),
-      ...(probeQ.data?.backends ?? []).map(b => b.id),
-    ]),
-  ).sort((a, b) => {
-    if (a === KIRO) return -1
-    if (b === KIRO) return 1
-    // KAS second, ahead of the byte order below. It is not an adapter: it is kiro-cli's
-    // own ACP relay, resolved from the same binary and sharing kiro's install verdict
-    // (`_probe_kas` delegates to `_probe_kiro`), so the two harnesses that are really
-    // one install belong adjacent at the head of the row. Under `policy_id` alone it
-    // sorts on 'k' and lands behind every adapter whose name happens to start earlier
-    // ('claude', 'codex'), which reads to the operator as a rank rather than an
-    // alphabet.
-    if (a === KAS) return -1
-    if (b === KAS) return 1
-    // Byte order, not `localeCompare`/`compareText`: these are machine identifiers,
-    // and the point of the sort (see above) is to reproduce the order the probe
-    // endpoint already returned them in. A collator reads the READER's locale, so
-    // the same deployment would order the chips differently per browser -- the
-    // between-render reshuffle this sort exists to prevent, just keyed on locale
-    // instead of query timing.
-    const ka = probe(a)?.policy_id || a
-    const kb = probe(b)?.policy_id || b
-    if (ka === kb) return 0
-    return ka < kb ? -1 : 1
-  })
-
-  /**
-   * The agents this panel renders at all.
-   *
-   * An agent the deployment may not select is HIDDEN, not shown disabled. A greyed
-   * chip invites the reader to find out how to enable it, and under a managed policy
-   * there is nothing they can do — the answer is not on their machine. Advertising a
-   * forbidden option is also the opposite of what a restriction is for.
-   *
-   * `current` is always kept, whatever the verdict. The backend degrades a denied
-   * persisted value to the floor on load, so this should not arise; if it ever does,
-   * a control rendering no selected chip is a worse failure than one extra row.
-   */
-  const visible = candidates.filter(value => value === current || !unavailable(value))
-
-  /**
-   * Installed === 'missing' is the only verdict that disables. `'unknown'` and an
-   * absent row explicitly do not: see the header comment on why an optimistic
-   * disable is the more expensive mistake.
-   */
-  const notInstalled = (value: string) => probe(value)?.installed === 'missing'
-  /**
-   * Installed on disk, but this gateway process cached its absence and cannot
-   * spawn it until restarted. Disabling is right here even though the binary IS
-   * present: the click would reach a spawn that fails. This is the one case where
-   * a positive install verdict still gates the control.
-   */
-  const needsRestart = (value: string) => probe(value)?.restart_required === true
-  /**
-   * Selectability is deliberately NOT part of this: an unselectable agent is absent
-   * from `visible` rather than disabled, so the only reasons a rendered chip is dead
-   * are ones the user can act on — install the binary, or restart the gateway.
-   */
-  const disabledOption = (value: string) => notInstalled(value) || needsRestart(value)
 
   /**
    * A standing caveat about the harness itself, independent of whether it is
@@ -416,43 +247,6 @@ export function AgentBackendTab() {
     return lines
   }
 
-  /**
-   * Translated display names for the agents this frontend knows by name.
-   *
-   * Deliberately NOT the list of agents the panel renders — see `candidates`. An id
-   * absent here still gets a row; `nameOf` falls back to the server's `policy_id`.
-   */
-  const NAME: Record<string, string> = {
-    [KIRO]: i18nT('pages.developer.agentBackendTab.kiro_cli'),
-    [CLAUDE]: i18nT('pages.developer.agentBackendTab.claude_code'),
-    [KAS]: i18nT('pages.developer.agentBackendTab.kas_kiro_agent'),
-  }
-
-  const ICON: Record<string, React.ReactNode> = {
-    [KIRO]: <Terminal size={14} />,
-    [CLAUDE]: <Sparkles size={14} />,
-    [KAS]: <Bot size={14} />,
-  }
-
-  /**
-   * A label for any selectable id, known to this frontend or not.
-   *
-   * The fallback is the server's `policy_id`, which exists precisely to be a
-   * human-readable wire name (`acp_backends.POLICY_ID_BY_BACKEND`) — it is what a
-   * governance rule spells, so it is already a word rather than an internal token.
-   * Untranslated, and that is the deliberate trade: a registered agent rendering
-   * under its policy name is legible, whereas `NAME[value]` returning `undefined`
-   * renders a chip with no text at all. A core agent that ships selectable gets a
-   * real translated entry above; this keeps a plugin-registered one usable until
-   * then.
-   *
-   * KIRO is the empty string, so the `||` chain must not treat it as absent — it is
-   * always in NAME, which is why the lookup comes first.
-   */
-  const nameOf = (value: string): string => NAME[value] || probe(value)?.policy_id || value
-
-  /** Generic mark for an agent this frontend has no icon for. */
-  const iconOf = (value: string): React.ReactNode => ICON[value] ?? <Boxes size={14} />
 
 
   /**

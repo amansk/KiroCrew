@@ -42,7 +42,7 @@ from kiro_crew.acp.types import (
     STOP_REASON_CANCELLED,
     STOP_REASON_END_TURN,
 )
-from kiro_crew.acp_backends import POLICY_ID_BY_BACKEND
+from kiro_crew.acp_backends import POLICY_ID_BY_BACKEND, effort_option_id_for
 from kiro_crew.agent_sdk import host_auth
 from kiro_crew.agent_sdk.backend_identity import is_claude_backend_name
 from kiro_crew.agent_sdk.capabilities import SessionCapabilities, capabilities_for
@@ -1098,10 +1098,22 @@ class AcpProvider(LLMProvider):
     def supports_effort(self) -> bool:
         """True when the current model accepts a reasoning-effort level.
 
-        Drives the dashboard effort dropdown: shown only when the active
-        model is effort-capable (Opus/Sonnet), for both ACP backends.
+        Drives the dashboard effort dropdown. A live session that advertised an
+        effort selector (``get_valid_effort_levels``) is the authority -- that
+        list is what the adapter accepts, whatever the model is called; the
+        name heuristic answers only when the session reported nothing.
         """
-        return model_supports_effort(self._client._model)
+        model = self._client._model
+        if not model or model == DEFAULT_MODEL:
+            # ``auto`` pins no concrete model, so no selector applies yet --
+            # kiro refuses effort on auto, and the adapters' selector describes
+            # the model that will be resolved, not the sentinel.
+            return False
+        if self._client.backend in ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION:
+            levels = self._client.get_valid_effort_levels()
+            if isinstance(levels, list) and levels:
+                return True
+        return model_supports_effort(model)
 
     def _resolve_effort(self) -> str | None:
         """Resolve effort for the current model via the shared priority chain."""
@@ -1195,21 +1207,24 @@ class AcpProvider(LLMProvider):
         the push entirely — there is nothing to set, and attempting it would
         spam errors and trigger a session reset on every turn.
         """
+        option_id = effort_option_id_for(self._client.backend)
         if not self._client.supports_config_option("effort"):
-            logger.debug("adapter exposes no 'effort' config option; skipping effort push")
+            logger.debug("adapter exposes no %r config option; skipping effort push", option_id)
             return
         # Descend from the requested level through lower levels (e.g.
         # max → xhigh → high). Never escalate above what was asked.
         try:
             start = EFFORT_LEVELS.index(level)
         except ValueError:
-            await self._client.set_config_option("effort", level)
+            # A level outside this module's ladder (codex's ``ultra``): the
+            # adapter advertised it, so push it as is; there is no lower rung.
+            await self._client.set_config_option(option_id, level)
             return
         ladder = [lvl for lvl in reversed(EFFORT_LEVELS[: start + 1])]
         last_exc: Exception | None = None
         for candidate in ladder:
             try:
-                await self._client.set_config_option("effort", candidate)
+                await self._client.set_config_option(option_id, candidate)
                 if candidate != level:
                     logger.info(
                         "CC effort %r unsupported by model %s — applied %r instead",
@@ -1223,9 +1238,9 @@ class AcpProvider(LLMProvider):
                 if "unknown config option" in msg.lower():
                     # Adapter has no 'effort' option at all (older build) —
                     # nothing to set; skip silently rather than reset.
-                    logger.debug("claude-agent-acp rejected 'effort' as unknown; skipping")
+                    logger.debug("adapter rejected %r as unknown; skipping", option_id)
                     return
-                if "config option effort" not in msg:
+                if f"config option {option_id}" not in msg:
                     raise  # not a value-rejection — a real failure
                 last_exc = exc
                 continue
@@ -1245,7 +1260,7 @@ class AcpProvider(LLMProvider):
         so has no effort channel at all.
         """
         model = self._client._model
-        if not model_supports_effort(model):
+        if not self.supports_effort():
             logger.info("change_effort skipped — model %s does not support effort", model)
             return False
         via_config_option = self._client.backend in ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION

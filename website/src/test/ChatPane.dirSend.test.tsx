@@ -207,7 +207,9 @@ describe('ChatPane send — the response confirms the optimistic bubble', () => 
 describe('ChatPane agent switch — failures reach the shared notice', () => {
   async function openAgentPicker() {
     const { store } = renderPane('pane-agent')
-    const trigger = await screen.findByLabelText(/agent/i)
+    // The composer also carries the agent-BACKEND chip ("Agent backend: …"),
+    // so the agent chip is the label that names an agent and not a backend.
+    const trigger = await screen.findByLabelText((label: string) => /agent/i.test(label) && !/backend/i.test(label))
     fireEvent.click(trigger)
     return store
   }
