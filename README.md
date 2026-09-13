@@ -679,6 +679,7 @@ make this tool possible:
 <a href="https://github.com/Alexander-Yuan" title="Alexander-Yuan"><img src="https://github.com/Alexander-Yuan.png?size=64" width="64" height="64" alt="Alexander-Yuan" /></a>
 <a href="https://github.com/AlexShen101" title="Alex Shen"><img src="https://github.com/AlexShen101.png?size=64" width="64" height="64" alt="Alex Shen" /></a>
 <a href="https://github.com/amadsalmon" title="Amad Salmon"><img src="https://github.com/amadsalmon.png?size=64" width="64" height="64" alt="Amad Salmon" /></a>
+<a href="https://github.com/amansk" title="Amandeep Khurana"><img src="https://github.com/amansk.png?size=64" width="64" height="64" alt="Amandeep Khurana" /></a>
 <a href="https://github.com/amergrgic" title="Amer Grgic"><img src="https://github.com/amergrgic.png?size=64" width="64" height="64" alt="Amer Grgic" /></a>
 <a href="https://github.com/AmirNaghibi" title="Amir Naghibi"><img src="https://github.com/AmirNaghibi.png?size=64" width="64" height="64" alt="Amir Naghibi" /></a>
 <a href="https://github.com/amulya349" title="Amulya Kumar Sahoo"><img src="https://github.com/amulya349.png?size=64" width="64" height="64" alt="Amulya Kumar Sahoo" /></a>
