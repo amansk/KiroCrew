@@ -269,6 +269,10 @@ class SlotProjection:
             # shown as "auto". "" = not known. DISPLAY only, like the verdict
             # above: never a write source.
             "served_model": slot.served_model,
+            # The harness this slot was created for; absent (None) when it
+            # follows the global ``agent.acp_backend``. DISPLAY only: fixed at
+            # creation, so there is no write path for the frontend to drive.
+            "acp_backend": slot.acp_backend,
             "reasoning_effort": slot.reasoning_effort,
             "mode": slot.mode,
             "surface": slot.mode,

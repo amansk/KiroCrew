@@ -5829,7 +5829,10 @@
       "session_control_ready": "Bereit",
       "session_control_chip_label": "{{label}} — {{detail}}",
       "agent_inherited_default": "Diese Sitzung folgt dem Standard-Agenten ({{name}}). Sie hat keinen eigenen Agenten, ändert sich also mit dem Standard. Zum Anheften klicken.",
-      "model_inherited_default": "Diese Sitzung läuft auf dem Standardmodell ({{name}}). Sie hat kein eigenes Modell, ändert sich also, wenn sich der Standard ändert. Klicken, um eines festzulegen."
+      "model_inherited_default": "Diese Sitzung läuft auf dem Standardmodell ({{name}}). Sie hat kein eigenes Modell, ändert sich also, wenn sich der Standard ändert. Klicken, um eines festzulegen.",
+      "backend": "Agent-Backend: {{name}}",
+      "backend_inherited_default": "Diese Sitzung läuft auf dem Standard-Agent-Backend ({{name}}). Sie hat kein eigenes Backend, ändert sich also, wenn sich der Standard ändert. Klicken, um eines festzulegen.",
+      "stop_the_current_response_to_switch_backend": "Aktuelle Antwort stoppen, um das Agent-Backend zu wechseln"
     },
     "chatPane": {
       "agent_list": "Agenten-Liste",

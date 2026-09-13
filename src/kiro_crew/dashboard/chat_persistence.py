@@ -217,6 +217,24 @@ def update_reasoning_effort_values(acp_levels: list[str]) -> None:
         _reasoning_effort_ordered = ordered
 
 
+def _restore_slot_acp_backend(slot: _ChatSlot, meta: Mapping) -> None:
+    """Rehydrate the slot's per-session harness pick from its metadata line.
+
+    Only a string is a pick; anything else (absent, null, a hand-edited number)
+    reads as "no pick" and the slot follows the global ``agent.acp_backend``,
+    exactly like a transcript written before the picker existed. The value is
+    NOT checked against the selectable set here: selectability is decided by the
+    ONE gate at spawn (``members.select_provider_backend`` →
+    ``resolve_selected_backend``, H3/H4), which degrades a harness this build no
+    longer serves to Kiro with a logged reason. Re-deriving that verdict on
+    restore would be the second gate H4 forbids, and would silently erase the
+    pick a later gateway (or edition) could honour again.
+    """
+    value = meta.get("acp_backend")
+    if isinstance(value, str):
+        slot.acp_backend = value
+
+
 def _validate_reasoning_effort(raw: object) -> str:
     """Return *raw* if it's a valid reasoning_effort string, else "".
 
@@ -1055,6 +1073,7 @@ def _rehydrate_slot_from_history(
                 logger.debug(
                     "Failed to resolve model for rehydrated slot %s", slot_name, exc_info=True
                 )
+        _restore_slot_acp_backend(slot, meta)
         if meta.get("reasoning_effort"):
             slot.reasoning_effort = _validate_reasoning_effort(meta["reasoning_effort"])
         if meta.get("autocompact_pct") is not None:
@@ -1625,6 +1644,7 @@ def _apply_recent_session(
             slot.model = kiro_model_map.get(kiro_name, "")
         except Exception:
             logger.debug("Failed to resolve model for restored slot %s", slot_name, exc_info=True)
+    _restore_slot_acp_backend(slot, meta)
     if meta.get("reasoning_effort"):
         slot.reasoning_effort = _validate_reasoning_effort(meta["reasoning_effort"])
     if meta.get("autocompact_pct") is not None:
@@ -2967,6 +2987,7 @@ def _save_slot_to_history(
                     "color_theme": slot.color_theme or "",
                     "memory_mode": slot.memory_mode,
                     "model": slot.model,
+                    "acp_backend": slot.acp_backend,
                     # None means "follow the global threshold" and is the
                     # cleared value (rehydrate reads it with ``is not None``),
                     # so the override is CLEARABLE: written even when None,
@@ -3299,6 +3320,10 @@ def _save_slot_to_history(
             if slot.agent:
                 meta_line["agent"] = slot.agent
             meta_line["model"] = slot.model
+            # Written only when picked: an absent key restores as None (follow
+            # the global), which is also what every pre-picker transcript says.
+            if slot.acp_backend is not None:
+                meta_line["acp_backend"] = slot.acp_backend
             if slot.reasoning_effort:
                 meta_line["reasoning_effort"] = slot.reasoning_effort
             # Unconditional, matching the empty-window merge mirror: None is

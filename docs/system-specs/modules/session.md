@@ -33,6 +33,70 @@ the peer's `POST /api/chat/slots` payload, while agent and model remain sparse
 explicit picks. Omitting the mode would let a local Incognito or Temporary row
 execute as Persistent on the peer and read or write memory the user disabled.
 
+A dashboard slot may also name the agent backend it runs on. `POST
+/api/chat/slots` accepts an optional `acp_backend` (`""` for Kiro CLI, `claude`,
+`codex`, …), validated only by membership in `acp_backends.selectable_backend_values()`
+— the same live list `GET /api/config/schema` renders — and answered `400
+invalid_acp_backend` otherwise. Absent means the slot follows the global
+`agent.acp_backend`, exactly as every slot did before. The pick is stored as
+`_ChatSlot.acp_backend` (`None` = no pick), written to the transcript metadata
+line and the window-merge fields only when set, restored verbatim by
+`chat_persistence._restore_slot_acp_backend` (a non-string reads as no pick, and
+selectability is deliberately NOT re-derived on restore), inherited by a fork,
+and echoed on every slot payload as `acp_backend`. Both `chat_runner`
+`get_or_create` sites pass it as `acp_backend=slot.acp_backend`, which reaches
+`create_provider_factory`'s optional kwarg through `extra_factory_kwargs` and is
+decided by the ONE selection gate — `members.select_provider_backend`, explicit
+pick > member-DM route > configured default, the non-default arms crossing
+`resolve_selected_backend` (harness-parity H3/H13). The factory resolves the
+session's model AFTER that selection and hands the selected backend to
+`acp_effective_model(..., acp_backend=)`, so the pin is translated into the
+namespace of the harness the session runs on, not the global one (a codex
+pick under a claude global keeps `gpt-…`; a claude pick under a codex global
+gets its `global.anthropic.*` id); a caller that passes no backend gets the
+global, unchanged.
+
+The pick can change: `POST /api/chat/slots/{slot}/backend` with
+`{"acp_backend": "<id>" | null}` (`null` clears it, so the slot follows the
+global again) is the composer chip's switch, validated exactly as the create is.
+A live session keeps the harness it started on, so the switch is a
+commit-then-reset like the workspace switch (`_reset_slot_session_or_warn`,
+`switch_kind="backend"`): the session is torn down and the next turn spawns on
+the new backend with the slot's transcript re-injected — history is kept, the
+process is not. The slot's `model` pin is cleared with it, because a model id
+belongs to the namespace of the harness that served it and carried across it is
+the unrepresentable pin that fails the next spawn. A running turn answers 409
+`turn_in_flight`, a member DM thread 409 `member_thread_backend_pinned` (it is
+routed by `agent.member_acp_backend`), and a crew-bound slot 409
+`remote_slot_backend`. Pinned by `test/test_per_session_backend.py`
+(`TestSwitchEndpoint`).
+
+Models follow the slot's harness: `GET /api/models?backend=<id>` answers that
+backend's own list (validated the same way, `400 invalid_acp_backend`), and the
+dashboard keys its model query and last-good cache on the slot's pick, so a
+codex slot offers what codex-acp advertised — captured on the last codex
+`session/new` and served from the cross-session cache until one runs, `auto`
+alone before that — never the configured backend's ids. Every row carries
+`effort_levels`: the picker lists BASE models only (codex's envelope composites
+`<base>[<effort>]` collapse to one row per base, `providers.md` "Reasoning
+effort"), and the effort dropdown lists that harness's own levels.
+`GET /api/effort-levels?slot=` answers the slot's live provider, else any live
+session of the slot's harness (its pick, else the configured backend) for the
+harnesses that advertise an effort selector, else the global list; the
+frontend's `modelEffortCapable` reads a row's `effort_levels` before its name
+heuristic, so `ultra` on codex and a future model name both light the dropdown
+from what the adapter said. The
+context-window figure the composer shows for such a slot is the row's
+`context_window`, which `model_registry.model_window` resolves (kiro list cache,
+static registry, supplementary map) and which falls to
+`model_registry.REFERENCE_WINDOW_TOKENS` for an id no source knows — the
+registry's own documented rule, so an unknown codex id keeps the full budget
+rather than a shrunk guess; a turn's live usage report then overrides it. Before
+this the figure for a codex slot was the dashboard's bundled default, because
+the only list it held was the configured backend's. Remote (crew-bound) creates
+do not carry the pick — the peer applies its own default, which is the point of
+the session running there.
+
 Cross-boundary calls that were observable on `SessionManager` route back through
 the facade, and patchable module dependencies are resolved through injected
 call-time functions. Persistence remains owned by the existing `SessionMap`

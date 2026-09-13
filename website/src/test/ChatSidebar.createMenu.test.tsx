@@ -327,7 +327,7 @@ describe('create-button caret menu', () => {
     await waitFor(() =>
       expect(mocks.createChatSlot).toHaveBeenCalledWith(
         undefined, undefined, undefined, undefined, 'persistent', undefined, undefined,
-        undefined, 'i-nobita',
+        undefined, 'i-nobita', undefined,
       ),
     )
   })

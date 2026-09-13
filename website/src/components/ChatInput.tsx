@@ -498,6 +498,16 @@ interface ChatInputProps {
   agentSource?: string
   modelName?: string
   /**
+   * The display name of the agent backend this session runs on — its own pick
+   * (`slot.acp_backend`) or, when it follows the global `agent.acp_backend`,
+   * that one. Shown as a chip before the model chip on every slot; with
+   * `onBackendClick` it opens the per-session picker. */
+  backendLabel?: string
+  /** True when the slot follows the global backend (no per-session pick), so
+   *  the chip carries the ` · default` marker the agent and model chips use. */
+  backendIsInheritedDefault?: boolean
+  onBackendClick?: (rect: DOMRect) => void
+  /**
    * True when `modelName` is the model an INHERITING slot actually runs on (the
    * backend's served default), not a pin. The chip then carries the same
    * ` · default` marker and explanatory tooltip the agent chip uses for its
@@ -895,6 +905,9 @@ function ChatInput({
   modelIsInheritedDefault,
   agentSource,
   modelName,
+  backendLabel,
+  backendIsInheritedDefault,
+  onBackendClick,
   onAgentClick,
   onModelClick,
   onProjectClick,
@@ -4947,6 +4960,36 @@ function ChatInput({
             </div>
             )
           })()}
+          {backendLabel && (
+            // The per-session agent backend, a picker like the agent and model
+            // chips beside it. Switching resets the live session (the next turn
+            // spawns on the new harness with the transcript re-injected), so it
+            // is locked while a turn runs, exactly as the model chip is.
+            <button
+              className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] text-muted hover:text-text px-2 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
+              onClick={e => onBackendClick?.(e.currentTarget.getBoundingClientRect())}
+              disabled={isRunning || !onBackendClick}
+              data-testid="composer-backend-chip"
+              title={isRunning
+                ? i18nT('components.chatInput.stop_the_current_response_to_switch_backend')
+                : backendIsInheritedDefault
+                  ? i18nT('components.chatInput.backend_inherited_default', { name: backendLabel })
+                  : i18nT('components.chatInput.backend', { name: backendLabel })}
+              aria-label={isRunning
+                ? i18nT('components.chatInput.stop_the_current_response_to_switch_backend')
+                : backendIsInheritedDefault
+                  ? i18nT('components.chatInput.backend_inherited_default', { name: backendLabel })
+                  : i18nT('components.chatInput.backend', { name: backendLabel })}
+            >
+              <span className="truncate max-w-[140px]">{backendLabel}</span>
+              {backendIsInheritedDefault && (
+                <>
+                  <span className="opacity-30 select-none shrink-0" aria-hidden="true">·</span>
+                  <span className="opacity-60 shrink-0">{i18nT('components.agentSelector.default')}</span>
+                </>
+              )}
+            </button>
+          )}
           {onModelClick && modelName && (
             <button
               className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] text-muted hover:text-text px-2 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"

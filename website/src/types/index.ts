@@ -997,6 +997,12 @@ export interface ChatSlot {
    *  `model_withheld`: it describes the session, so it must not drive a
    *  write. */
   served_model?: string
+  /** The agent backend this session was created for (`''` = Kiro CLI, `'claude'`,
+   *  `'codex'`, …), or `null`/absent when it follows the global
+   *  `agent.acp_backend` like every session did before the per-session pick
+   *  existed. Fixed at creation — a session keeps the harness it started on — so
+   *  this is DISPLAY only and never a write source. */
+  acp_backend?: string | null
   /** Remote-execution binding. `executor` is "local" for an ordinary session and
    *  "remote" for one whose turns run on a connected crew; `instance_id` names
    *  that crew. The backend ships BOTH on every slot so "runs locally" is a

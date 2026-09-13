@@ -655,6 +655,24 @@ ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION = frozenset(
 # advertises a ``mode`` select beside it and no ``effort`` option at all.
 ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION = frozenset({ACP_BACKEND_CLAUDE, ACP_BACKEND_CODEX})
 
+# The config option each member of that set spells its effort selector as.
+# claude-agent-acp advertises ``effort``; codex-acp advertises
+# ``reasoning_effort`` (beside a ``model`` select of BASE ids, while its
+# ``models`` envelope lists ``<base>[<effort>]`` composites). A data entry, not a
+# branch: the client and the provider read the id through
+# :func:`effort_option_id_for`, so an adapter that spells it a third way is one
+# row here. Absent means the historical ``effort`` spelling.
+ACP_BACKEND_EFFORT_OPTION_ID: dict[str, str] = {
+    ACP_BACKEND_CLAUDE: "effort",
+    ACP_BACKEND_CODEX: "reasoning_effort",
+}
+
+
+def effort_option_id_for(backend: str) -> str:
+    """The ``session/set_config_option`` id *backend* names its effort level by."""
+    return ACP_BACKEND_EFFORT_OPTION_ID.get(backend, "effort")
+
+
 # Backends that resolve the WIRE model id from the provider's OWN advertised list
 # (captured from ``session/new`` and cached across sessions) rather than trusting
 # the stored id verbatim. Needed where the spelling a backend SERVES differs from

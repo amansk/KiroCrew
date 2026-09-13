@@ -43,11 +43,15 @@ const PLACEHOLDER: ModelInfo[] = [{ name: 'auto', description: '' }]
  * kiro-cli. Other mounted observers still fetch normally — `enabled` gates who
  * *triggers* a fetch, not what lands in the cache.
  */
-export function useAvailableModels({ enabled }: { enabled?: boolean } = {}): ModelInfo[] {
+export function useAvailableModels({ enabled, backend }: { enabled?: boolean; backend?: string } = {}): ModelInfo[] {
   const provider = useProvider()
   const { data } = useQuery({
-    queryKey: ['available-models', provider.id],
-    queryFn: async () => withAutoFirst(await provider.fetchAvailableModels()),
+    // `backend` is a slot's per-session harness pick (see useSlotAcpBackend):
+    // its list is a different harness's, so it gets its own cache entry rather
+    // than sharing the configured backend's. The key keeps the
+    // `['available-models']` prefix every invalidation targets.
+    queryKey: backend === undefined ? ['available-models', provider.id] : ['available-models', provider.id, backend],
+    queryFn: async () => withAutoFirst(await provider.fetchAvailableModels(backend)),
     refetchInterval: modelListRefetchInterval,
     ...(enabled === undefined ? {} : { enabled }),
   })

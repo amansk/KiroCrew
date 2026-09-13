@@ -22,6 +22,7 @@ _TO_DICT_KEYS = (
     "model",
     "model_withheld",
     "served_model",
+    "acp_backend",
     "reasoning_effort",
     "mode",
     "surface",

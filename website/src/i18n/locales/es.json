@@ -5922,7 +5922,10 @@
       "session_control_ready": "Listo",
       "session_control_chip_label": "{{label}} — {{detail}}",
       "agent_inherited_default": "Esta sesión sigue el agente predeterminado ({{name}}). No tiene un agente propio, así que cambia si cambia el predeterminado. Haz clic para fijar uno.",
-      "model_inherited_default": "Esta sesión usa el modelo predeterminado ({{name}}). No tiene un modelo propio, así que cambia si cambia el predeterminado. Haz clic para fijar uno."
+      "model_inherited_default": "Esta sesión usa el modelo predeterminado ({{name}}). No tiene un modelo propio, así que cambia si cambia el predeterminado. Haz clic para fijar uno.",
+      "backend": "Backend del agente: {{name}}",
+      "backend_inherited_default": "Esta sesión usa el backend de agente predeterminado ({{name}}). No tiene un backend propio, así que cambia si cambia el predeterminado. Haz clic para fijar uno.",
+      "stop_the_current_response_to_switch_backend": "Detén la respuesta actual para cambiar el backend del agente"
     },
     "chatPane": {
       "agent_list": "Lista de agentes",

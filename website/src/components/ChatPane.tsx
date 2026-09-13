@@ -57,6 +57,8 @@ import { classifyDrop } from '../utils/dropClassify'
 import { prepareSendPayload, serializeDirTokens, spliceDirTokens, VIDEO_EXT } from '../utils/fileTokens'
 import { Composer, type ComposerHandle, type ComposerVoiceOptions } from '../chat-core/composer/Composer'
 import { displayModel } from '../lib/model'
+import { useSlotAcpBackend } from '../hooks/useAcpBackendChoices'
+import { AcpBackendDropdown } from './AcpBackendDropdown'
 
 
 import { i18nT } from '../i18n/t'
@@ -245,6 +247,8 @@ export default function ChatPane({
   const [stopError, setStopError] = useState('')
   const [agentBtnRect, setAgentBtnRect] = useState<DOMRect | null>(null)
   const [modelBtnRect, setModelBtnRect] = useState<DOMRect | null>(null)
+  const [backendBtnRect, setBackendBtnRect] = useState<DOMRect | null>(null)
+  const [backendOpen, setBackendOpen] = useState(false)
   // The transcript is virtualized (chat-core P5-e): ChatMessageList owns the
   // scroller and the stick-to-bottom follow through VirtualTranscript. The pane
   // keeps the element ref for the pinned-prompt hook, a handle for the jump
@@ -440,7 +444,10 @@ export default function ChatPane({
       .catch(() => setDefaultAgentFailed(true))
   }, [dispatch])
   const agentDD = useFilteredDropdown(installedAgents)
-  const availableModels = useAvailableModels()
+  // The slot's own harness decides which model list the picker offers: a
+  // per-session pick fetches that backend's list (`/api/models?backend=`).
+  const slotBackend = useSlotAcpBackend(paneSlot?.acp_backend)
+  const availableModels = useAvailableModels({ backend: slotBackend.backendParam })
   const modelDD = useFilteredDropdown(availableModels)
   // See ChatPage: display what will actually run, not a pin the account lost
   // access to. The slot's own `model_withheld` verdict answers that when the
@@ -506,6 +513,27 @@ export default function ChatPane({
       const msg = agentSwitchFailureMessage(e)
       dispatch(setAgentSwitchNotice(msg))
       setSwitchError(msg)
+    }
+  }, [dispatch, slotKey])
+  const switchBackend = useCallback(async (value: string | null) => {
+    setSwitchError('')
+    try {
+      // Same protocol as switchModel below. The server clears the slot's model
+      // pin with the switch (it belonged to the old harness), so the store
+      // write carries both fields from the one authoritative answer.
+      await performSlotSwitch('backend', slotKey, value ?? '',
+        async () => {
+          const r = await api.chatSlotBackend(slotKey, value)
+          dispatch(updateSlot({ key: slotKey, model: r?.model ?? '' }))
+          return r?.acp_backend ?? value
+        },
+        (picked) => dispatch(updateSlot({ key: slotKey, acp_backend: picked })))
+    } catch (e) {
+      const msg = agentSwitchFailureMessage(e)
+      dispatch(setAgentSwitchNotice(msg))
+      setSwitchError(msg)
+      // eslint-disable-next-line no-console
+      console.error('[ChatPane] switchBackend failed', e)
     }
   }, [dispatch, slotKey])
   const switchModel = useCallback(async (name: string) => {
@@ -1446,6 +1474,9 @@ export default function ChatPane({
           agentIsInheritedDefault={!paneSlot?.agent && !!paneEffectiveDefaultAgent}
           agentSource={installedAgents.find((a) => a.name === paneAgentName)?.source}
           modelName={shownModel}
+          backendLabel={slotBackend.label}
+          backendIsInheritedDefault={!slotBackend.isPick}
+          onBackendClick={(rect) => { setBackendBtnRect(rect); setBackendOpen(!backendOpen) }}
           modelIsInheritedDefault={shownModel !== 'auto' && shownModel !== _pinShownModel}
           contextPct={contextPct}
           contextUsedTokens={contextTokens?.used}
@@ -1525,6 +1556,15 @@ export default function ChatPane({
         </div>
 
         {/* Agent picker portal — anchored to the input-bar agent button. */}
+        {backendOpen && backendBtnRect && createPortal(
+          <AcpBackendDropdown
+            anchorRect={backendBtnRect}
+            effective={slotBackend.effective}
+            onSelect={value => { void switchBackend(value) }}
+            onClose={() => setBackendOpen(false)}
+          />,
+          document.body
+        )}
         {agentDD.open && agentBtnRect && createPortal(
           /* The labeled dialog owns roving-focus key handling for its descendants. */
           // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions

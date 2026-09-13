@@ -25,6 +25,7 @@ from kiro_crew.acp.client import advertised_model_ids, model_is_unusable
 from kiro_crew.acp_backends import (
     ACP_BACKEND_CLAUDE,
     ACP_BACKEND_CODEX,
+    ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION,
     model_registry_namespace,
     selectable_backend_values,
 )
@@ -88,7 +89,10 @@ from kiro_crew.config.sections import _AVATAR_IMAGE_EXTS as _LOADER_AVATAR_IMAGE
 from kiro_crew.config.sections import (
     _safe_avatar,
 )
-from kiro_crew.dashboard.chat_persistence import get_reasoning_effort_ordered
+from kiro_crew.dashboard.chat_persistence import (
+    get_reasoning_effort_ordered,
+    update_reasoning_effort_values,
+)
 from kiro_crew.dashboard.chat_utils import (
     _BLOCKED_SLASH_COMMANDS,
     _SLASH_COMMANDS,
@@ -111,7 +115,7 @@ from kiro_crew.dashboard.handlers._shared import (
 from kiro_crew.dashboard.handlers.discover import _redact_external
 from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
 from kiro_crew.dashboard.state import DashboardState
-from kiro_crew.effort import EFFORT_LEVELS, EFFORT_VALUES
+from kiro_crew.effort import EFFORT_LEVELS, EFFORT_VALUES, collapse_effort_variants
 from kiro_crew.executors import discovery_executor, maintenance_executor, subprocess_executor
 from kiro_crew.loop_lock import LoopBoundLock
 from kiro_crew.member_memory_auth import require_member_memory_creation
@@ -1844,6 +1848,35 @@ def _advertised_cc_models(request: web.Request, namespace: str) -> list[dict]:
     return []
 
 
+def _advertised_effort_levels(request: web.Request, namespace: str) -> list[str]:
+    """The effort levels a live session of *namespace* advertised, newest first.
+
+    Same selection as :func:`_advertised_cc_models` (capability, then
+    namespace), reading ``get_valid_effort_levels`` instead of the model list.
+    ``[]`` when no such session is live or it advertised no effort selector.
+    """
+    try:
+        state: DashboardState = request.app["state"]
+        providers = state.sessions.active_providers()
+    except (KeyError, AttributeError):
+        return []
+    for provider in reversed(providers):
+        if not capabilities_of(provider).resolves_model_from_advertised_list:
+            continue
+        if capabilities_of(provider).model_id_namespace != namespace:
+            continue
+        getter = getattr(provider, "get_valid_effort_levels", None)
+        if not callable(getter):
+            continue
+        try:
+            levels = getter()
+        except Exception:
+            continue
+        if isinstance(levels, list) and levels:
+            return [str(lv) for lv in levels]
+    return []
+
+
 def _entitled_kiro_models(request: web.Request, models: list[dict]) -> list[dict]:
     """Narrow the ``--list-models`` catalog to what a live session advertises.
 
@@ -2058,6 +2091,13 @@ def _cc_models(request: web.Request, configured_default: str = "") -> list[dict]
             entry["context_window"] = (
                 model_registry.model_window(name) or model_registry.REFERENCE_WINDOW_TOKENS
             )
+    # The effort levels the live claude session advertised, carried on every
+    # row so the model picker and the effort dropdown read one payload (the
+    # codex branch does the same); ``[]`` when no session has reported any,
+    # which the frontend reads as "use its name heuristic".
+    cc_levels = _advertised_effort_levels(request, "claude_code")
+    for entry in merged:
+        entry["effort_levels"] = cc_levels
     return merged
 
 
@@ -2090,22 +2130,47 @@ def _codex_models(request: web.Request, configured_default: str = "") -> list[di
         cached = model_registry.advertised_models(codex_namespace)
         advertised = [{"model_name": m, "display_name": m, "description": ""} for m in cached]
 
-    rows: list[dict] = [
-        {"model_name": "auto", "display_name": "Auto", "description": "Backend default"}
-    ]
-    seen: set[str] = {"auto"}
+    # Model and effort are two choices, so the picker lists BASE models only.
+    # A live codex session advertises them that way already (its ``model``
+    # select), but the cross-session cache may still hold the envelope's
+    # ``<base>[<effort>]`` composites from an older capture; those collapse to
+    # one row per base, and the levels they spelled out stand in for the
+    # session's ``reasoning_effort`` select until a session reports one.
+    live_levels = _advertised_effort_levels(request, codex_namespace)
+    by_base: dict[str, dict] = {}
     for entry in advertised:
         name = str(entry.get("model_name", "") or "").strip()
-        if not name or _normalize_model_key(name) == "auto" or name in seen:
+        if not name or _normalize_model_key(name) == "auto":
             continue
-        seen.add(name)
+        by_base.setdefault(name, entry)
+    collapsed = collapse_effort_variants(list(by_base))
+    rows: list[dict] = [
+        {
+            "model_name": "auto",
+            "display_name": "Auto",
+            "description": "Backend default",
+            "effort_levels": live_levels,
+        }
+    ]
+    seen: set[str] = {"auto"}
+    for base, variant_levels in collapsed:
+        if base in seen:
+            continue
+        seen.add(base)
+        entry = by_base.get(base) or {}
+        levels = live_levels or variant_levels
         rows.append(
             {
-                "model_name": name,
-                "display_name": entry.get("display_name") or name,
-                "description": entry.get("description", ""),
+                "model_name": base,
+                "display_name": (entry.get("display_name") or base) if base in by_base else base,
+                "description": entry.get("description", "") if base in by_base else "",
+                "effort_levels": levels,
             }
         )
+        if levels:
+            # The adapter's own vocabulary (``ultra`` is not in EFFORT_LEVELS)
+            # must validate on the slot endpoint before a session reports it.
+            update_reasoning_effort_values(levels)
     default = (configured_default or "").strip()
     if (
         default
@@ -2149,9 +2214,24 @@ async def api_models(request: web.Request) -> web.Response:
     kiro-family backends read kiro-cli's ``--list-models`` catalog (narrowed to a
     live session's entitlement); claude and codex read what their adapter
     advertised, because neither accepts an id from that catalog.
+
+    ``?backend=<id>`` answers for THAT backend instead of the configured one — the
+    list a slot with a per-session pick (``_ChatSlot.acp_backend``) offers, which
+    is the same list the picker would show if that backend were global. The id
+    is validated by membership in ``selectable_backend_values()`` (the one
+    selectability owner) and refused ``400 invalid_acp_backend`` otherwise; no
+    param keeps the configured-backend behaviour byte for byte.
     """
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
-    backend = getattr(cfg.agent, "acp_backend", "")
+    requested = request.query.get("backend")
+    if isinstance(requested, str):
+        if requested not in selectable_backend_values():
+            return web.json_response(
+                {"error": "invalid acp_backend", "code": "invalid_acp_backend"}, status=400
+            )
+        backend = requested
+    else:
+        backend = getattr(cfg.agent, "acp_backend", "")
     if backend == ACP_BACKEND_CLAUDE:
         return web.json_response(_cc_models(request, configured_default=cfg.agent.model))
     if backend == ACP_BACKEND_CODEX:
@@ -2354,6 +2434,20 @@ async def api_effort_levels(request: web.Request) -> web.Response:
             getter = getattr(provider, "get_valid_effort_levels", None) if provider else None
             if callable(getter):
                 levels = getter()
+                if levels:
+                    return web.json_response(levels)
+            # No live session for this slot: answer from any live session of
+            # the SAME harness (the slot's own pick, else the configured
+            # backend), since an adapter advertises one effort vocabulary per
+            # harness, not per session. Only for the harnesses that advertise
+            # one over config options; the others keep the global list.
+            chat_slot = state._slots.get(slot)
+            backend = getattr(chat_slot, "acp_backend", None)
+            if backend is None:
+                cfg = await asyncio.to_thread(KiroCrewConfig.load)
+                backend = getattr(cfg.agent, "acp_backend", "")
+            if backend in ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION:
+                levels = _advertised_effort_levels(request, model_registry_namespace(backend))
                 if levels:
                     return web.json_response(levels)
         except (KeyError, AttributeError):

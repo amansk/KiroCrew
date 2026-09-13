@@ -4834,6 +4834,7 @@ class KiroCrewConfig:
         agent: str | None,
         model_override: str | None,
         global_model: str | None = None,
+        acp_backend: str | None = None,
     ) -> str:
         """The model id the ACP factory selects — what its effort gate keys on.
 
@@ -4887,7 +4888,15 @@ class KiroCrewConfig:
             m = self._resolve_named_agent_model(agent) or global_model
         if not m:
             return ""
-        namespace = capabilities_for(self.agent.acp_backend).model_id_namespace
+        # ``acp_backend`` is the backend the SESSION will run on -- the one
+        # ``select_provider_backend`` chose, which a per-session pick can make
+        # differ from ``agent.acp_backend``. Translating into the global
+        # backend's namespace would hand a codex-picked slot under a claude
+        # global a ``global.anthropic.*`` spelling codex refuses (and the
+        # reverse). Optional, defaulting to the global, so every caller that
+        # builds no session for a specific slot is unchanged (H13).
+        backend = self.agent.acp_backend if acp_backend is None else acp_backend
+        namespace = capabilities_for(backend).model_id_namespace
         if namespace != MODEL_NAMESPACE_ACP:
             return model_registry.to_provider_id(m, namespace)
         return model_registry.to_acp_id(m)
@@ -5107,6 +5116,7 @@ class KiroCrewConfig:
             extra_env: dict[str, str] | None = None,
             reasoning_effort_override: str | None = None,
             crew_agent: str | None = None,
+            acp_backend: str | None = None,
             **_kwargs: object,
         ) -> AcpProvider:
             wdir = Path(cwd) if cwd else _session_work_dir(session_key)
@@ -5137,7 +5147,21 @@ class KiroCrewConfig:
             # gate actually keys on. (Why the translation is keyed on the
             # backend, and why to_acp_id is the non-claude choice, is documented
             # on that method.)
-            m = self.acp_effective_model(agent, model_override, global_model=model)
+            from kiro_crew.members import select_provider_backend
+
+            # ``acp_backend`` is the slot's own pick (None = no pick), an INPUT
+            # to the one gate rather than a branch here: optional, defaulting
+            # to the older behaviour, so the kiro construction path gains no
+            # required argument and no failure mode (H13).
+            _backend = select_provider_backend(
+                session_key,
+                self.agent.member_acp_backend,
+                self.agent.acp_backend,
+                explicit=acp_backend,
+            )
+            m = self.acp_effective_model(
+                agent, model_override, global_model=model, acp_backend=_backend
+            )
             # Thread the slot's effort into a per-model override so the kiro
             # cli.json overlay is written from it at spawn — without this, a
             # kiro cold start (or the handler's reset-then-respawn) would only
@@ -5194,13 +5218,6 @@ class KiroCrewConfig:
             # kiro — the member thread then runs as plain chat and the mount
             # step logs why.
             # circular import: members sits above config in the layering.
-            from kiro_crew.members import select_provider_backend
-
-            _backend = select_provider_backend(
-                session_key,
-                self.agent.member_acp_backend,
-                self.agent.acp_backend,
-            )
             return AcpProvider(
                 work_dir=wdir,
                 model=m,
