@@ -3737,7 +3737,10 @@ class TestKiroPrerequisiteHandlers:
             {"role": "assistant", "content": "answer", "ts": "a1"},
         ]
         original_messages = copy.deepcopy(messages)
-        slot = SimpleNamespace(messages=messages)
+        # Regenerate gates on the slot's LIVE session backend, so the stub
+        # needs the key that names that session; the mocked manager holds no
+        # live session, which lands the gate on the configured default.
+        slot = SimpleNamespace(messages=messages, key="paused")
         sessions = MagicMock()
         persistence = MagicMock()
         state = SimpleNamespace(

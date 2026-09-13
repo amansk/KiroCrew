@@ -531,6 +531,12 @@ class AcpProvider(LLMProvider):
         return self._client.backend == ACP_BACKEND_KIRO
 
     @property
+    def acp_backend(self) -> str | None:
+        """The backend id this session was started on (see ``LLMProvider``)."""
+        backend = self._client.backend
+        return backend if isinstance(backend, str) else None
+
+    @property
     def is_acp_runtime_backend(self) -> bool:
         """True when this provider is served by AcpRuntime (kiro-cli or KAS).
 

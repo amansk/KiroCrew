@@ -125,6 +125,19 @@ class LLMProvider(ABC):
         return False
 
     @property
+    def acp_backend(self) -> str | None:
+        """The ``acp_backend`` id this provider was started on, or ``None``.
+
+        ``None`` means "not an ACP harness" (or unknown), and a consumer treats
+        it as unknown rather than as any particular backend. Declared here with
+        that safe default (harness-parity H14) so a session-scoped reader -- the
+        dashboard's kiro-cli readiness gate asks a LIVE session which harness a
+        rerun will actually continue on -- never has to ``getattr``-probe the
+        provider it was handed.
+        """
+        return None
+
+    @property
     def child_fidelity_aware(self) -> bool:
         """Consumer opt-in for the low-fidelity CHILD permission downgrade.
 
