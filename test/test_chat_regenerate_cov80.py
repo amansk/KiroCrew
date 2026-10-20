@@ -1378,6 +1378,7 @@ async def test_regenerate_gates_on_the_live_sessions_backend_after_a_hot_switch(
             provider=SimpleNamespace(uses_kiro_identity_store=True)
         )
     }
+    state.sessions.is_provider_alive = AsyncMock(return_value=True)
     configured = SimpleNamespace(agent=SimpleNamespace(acp_backend=ACP_BACKEND_CLAUDE))
     with patch.object(KiroCrewConfig, "load", classmethod(lambda cls: configured)):
         async with _client(state) as client:

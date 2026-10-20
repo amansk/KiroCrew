@@ -287,6 +287,34 @@ class TestApiCompletionsBlocking:
         assert body["code"] == "app_token_forbidden"
         readiness.assert_not_awaited()
 
+    async def test_app_probing_an_absent_slot_gets_the_403_before_readiness(self):
+        """An app cannot tell an absent slot from an existing unscoped one.
+
+        Both end as the unscoped 403; answering the absent one only after the
+        readiness gate would turn a signed-out kiro-cli into a 503 existence
+        oracle (red before the pre-readiness refusal covered absent targets).
+        """
+        state = _make_state(_make_slot())
+        request = _make_request(
+            {
+                "model": "vanellope",
+                "messages": [{"role": "user", "content": "hello"}],
+                "id": "no-such-slot",
+            },
+            state,
+            app="app-A",
+        )
+
+        with patch(
+            "kiro_crew.dashboard.openai_compat.reject_if_kiro_unverified",
+            AsyncMock(side_effect=AssertionError("readiness answered before ownership")),
+        ) as readiness:
+            response = await api_completions(request)
+
+        assert response.status == 403
+        assert json.loads(response.text)["code"] == "app_token_forbidden"
+        readiness.assert_not_awaited()
+
     async def test_recreated_foreign_remote_slot_is_rejected_before_remote_state(self):
         """A post-readiness replacement cannot leak its remote-slot branch."""
         original = _make_slot()
@@ -516,6 +544,36 @@ class TestApiCompletionsBlocking:
         assert body["error"]["type"] == "server_error"
         assert body["code"] == "server_error"
 
+    async def test_kiro_backed_turn_failing_with_no_reply_is_a_server_error(self):
+        """The no-reply rule is backend-independent: a kiro turn that the gate let
+        through and that then fails mid-turn is a 500 too, never an empty 200."""
+        from types import SimpleNamespace
+
+        from kiro_crew.acp_backends import ACP_BACKEND_KIRO
+        from kiro_crew.config import KiroCrewConfig
+
+        slot = _make_slot()
+        state = _make_state(slot)
+        request = _make_request(
+            {"model": "kiro", "messages": [{"role": "user", "content": "hello"}]},
+            state,
+        )
+        configured = SimpleNamespace(agent=SimpleNamespace(acp_backend=ACP_BACKEND_KIRO))
+
+        async def fake_run_chat(_state, _slot, _prompt, **_kwargs):
+            slot._pending.append({"role": "error", "content": "kiro-cli exited with code 1"})
+            slot._pending.append({"cls": "done"})
+            slot.event.set()
+
+        with (
+            patch.object(KiroCrewConfig, "load", classmethod(lambda cls: configured)),
+            patch("kiro_crew.dashboard.openai_compat._run_chat", side_effect=fake_run_chat),
+        ):
+            response = await api_completions(request)
+
+        assert response.status == 500
+        assert json.loads(response.text)["code"] == "server_error"
+
     async def test_an_error_row_after_reply_text_keeps_the_reply(self):
         """A turn that answered and then logged an error row still returns its answer."""
         from types import SimpleNamespace
@@ -568,7 +626,8 @@ class TestApiCompletionsBlocking:
                 effective_session_key(slot): SimpleNamespace(
                     provider=SimpleNamespace(uses_kiro_identity_store=True)
                 )
-            }
+            },
+            is_provider_alive=AsyncMock(return_value=True),
         )
         request = _make_request(
             {
@@ -733,7 +792,8 @@ class TestApiCompletionsBlocking:
                 effective_session_key(slot): SimpleNamespace(
                     provider=SimpleNamespace(uses_kiro_identity_store=True)
                 )
-            }
+            },
+            is_provider_alive=AsyncMock(return_value=True),
         )
         request = _make_request(
             {

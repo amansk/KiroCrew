@@ -390,11 +390,15 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
     # App ownership precedes the live-session readiness peek below. Otherwise an
     # app that does not own a slot could tell a live kiro-backed session (503)
     # from a foreign or absent one (the ordinary 403), reading state it may not
-    # see. The post-creation check further down repeats this on the slot the
-    # request actually obtains.
+    # see. An app is refused for an ABSENT target here too: a slot this request
+    # would create is unscoped, which the post-creation check refuses anyway,
+    # and answering it after readiness would let an app tell an existing
+    # unscoped slot (403) from a missing one (503) while kiro-cli is signed out.
+    # The post-creation check further down repeats this on the slot the request
+    # actually obtains.
     request_app = request.get("app", "") or ""
     live_slot = state._slots.get(normalized_slot_id) if slot_id else None
-    if live_slot is not None:
+    if request_app:
         refused = _reject_unowned_app_slot(request, state, live_slot, slot_id=slot_id)
         if refused is not None:
             return refused
@@ -414,7 +418,7 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
     # empty 200.
     live_key = effective_session_key(live_slot) if live_slot is not None else None
     signs_in_via_kiro_cli = (
-        live_session_signs_in_via_kiro_cli(state, live_key) if live_key is not None else None
+        await live_session_signs_in_via_kiro_cli(state, live_key) if live_key is not None else None
     )
     if signs_in_via_kiro_cli is None:
         signs_in_via_kiro_cli = backend_signs_in_via_kiro_cli(

@@ -18,18 +18,19 @@ latched value can be arbitrarily stale. That splits the callers in two:
   ``docs/system-specs/modules/acp-client.md`` § "Poll-driven spawn sites are
   readiness-gated".
 
-Both halves describe a KIRO-CLI sign-in, so both apply only while the selected
-harness authenticates through kiro-cli's identity store
-(:func:`backend_signs_in_via_kiro_cli` over :func:`selected_backend`). On a
-deployment whose
-``agent.acp_backend`` is claude-agent-acp or codex-acp the latch describes a
-binary the sessions never spawn: refusing on it locked every gated endpoint
-behind a kiro-cli sign-in the operator had deliberately stopped needing.
+The latch describes a KIRO-CLI sign-in. The destructive reruns and
+``/v1/chat/completions`` therefore apply it only while the session they act on
+authenticates through kiro-cli's identity store
+(:func:`backend_signs_in_via_kiro_cli` over :func:`selected_backend`): on a
+claude-agent-acp or codex-acp session it describes a binary that session never
+spawns. The poll-driven spawn sites run kiro-cli themselves, so they pass
+``signs_in_via_kiro_cli=True`` and stay gated whatever the selected harness.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 
@@ -195,7 +196,7 @@ def backend_signs_in_via_kiro_cli(backend: str | None) -> bool:
     return backend in backends_retired_by_host_logout()
 
 
-def live_session_signs_in_via_kiro_cli(state: object, session_key: str) -> bool | None:
+async def live_session_signs_in_via_kiro_cli(state: object, session_key: str) -> bool | None:
     """Whether a LIVE session on *session_key* signs in through kiro-cli, or ``None``.
 
     A live session keeps the backend it was started on: ``PATCH
@@ -215,21 +216,65 @@ def live_session_signs_in_via_kiro_cli(state: object, session_key: str) -> bool 
     a live session carrying a ``bool`` declaration answers ``None`` -- a mocked
     manager, a key with no session, a provider that declares nothing -- and the
     caller then resolves the backend its next session will use.
+
+    "Live" means the manager's own ``is_provider_alive`` answers ``True``, the
+    test ``chat_turn/slash_commands._slash_command_backend`` uses. A row whose
+    process has exited is not reused: ``get_or_create`` evicts it and builds the
+    turn's session on the installed factory, so a dead foreign row must not
+    answer for a kiro-cli successor. Anything but ``True`` (dead, unknown, no
+    probe, a probe that raised) answers ``None``, failing toward the gate.
     """
 
-    sessions = getattr(getattr(state, "sessions", None), "_sessions", None)
+    manager = getattr(state, "sessions", None)
+    sessions = getattr(manager, "_sessions", None)
     if not isinstance(sessions, dict):
         return None
     declared = getattr(
         getattr(sessions.get(session_key), "provider", None), "uses_kiro_identity_store", None
     )
-    return declared if isinstance(declared, bool) else None
+    if not isinstance(declared, bool):
+        return None
+    probe = getattr(manager, "is_provider_alive", None)
+    if not callable(probe):
+        return None
+    try:
+        alive = probe(session_key)
+        if inspect.isawaitable(alive):
+            alive = await alive
+    except Exception:
+        logger.debug("live-session liveness probe failed for %s", session_key, exc_info=True)
+        return None
+    return declared if alive is True else None
+
+
+def refuse_rerun_after_signed_out_turn(slot: object) -> web.Response | None:
+    """503 for a foreign-harness rerun on a slot whose last turn ended signed out.
+
+    The kiro-cli latch says nothing about a foreign harness, so the replacement
+    turn is the sign-in authority there, and a rerun truncates durably before it
+    runs. The one sign-in fact Crew does hold for that harness is the slot's own
+    last outcome: ``_last_turn_auth_required`` is set when a turn ends
+    ``AcpAuthRequired`` and rewritten when the next turn ends. When it is set the
+    rerun would cut history only to fail the same way, so refuse before the
+    first destructive write. An ordinary send stays ungated: it mutates nothing
+    up front, and its turn clears the flag once the harness is signed in again.
+    """
+    if getattr(slot, "_last_turn_auth_required", False) is True:
+        return web.json_response(
+            {
+                "error": "The last turn here ended because the coding agent is signed "
+                "out. Sign in, then send a message before rewriting this conversation.",
+                "code": "harness_sign_in_required",
+            },
+            status=503,
+        )
+    return None
 
 
 async def rerun_signs_in_via_kiro_cli(state: object, session_key: str) -> bool:
     """Continuing-rerun verdict: live session, then installed pair, then config."""
 
-    live_verdict = live_session_signs_in_via_kiro_cli(state, session_key)
+    live_verdict = await live_session_signs_in_via_kiro_cli(state, session_key)
     if live_verdict is not None:
         return live_verdict
     return backend_signs_in_via_kiro_cli(await selected_backend(session_key, state=state))
@@ -400,7 +445,6 @@ async def reject_if_kiro_unverified(
     request: web.Request,
     *,
     max_age_secs: float = _VERIFY_MAX_AGE_SECS,
-    backend: str | None = None,
     signs_in_via_kiro_cli: bool | None = None,
     session_key: str | None = None,
     state: object | None = None,
@@ -445,44 +489,34 @@ async def reject_if_kiro_unverified(
     pollers would otherwise pay on each tick.
 
     The latch governs ONLY a harness that signs in through kiro-cli
-    (:func:`backend_signs_in_via_kiro_cli`). *backend* is the harness the caller
-    is about to act on: a caller that already read the configured backend for
-    its own branch passes that same snapshot so one request cannot authorize a
-    spawn on two different configurations, and a caller that continues a live
-    session passes that session's own verdict as *signs_in_via_kiro_cli*
-    (:func:`live_session_signs_in_via_kiro_cli`), which survives a hot switch of
-    the default and outranks *backend*. Left ``None``, the configured gateway
-    default is read here; destructive reruns instead pass *session_key* and
-    *state* so this gate re-selects the installed factory backend at their
-    mutation boundary. A caller acting for ONE session at its early gate
-    resolves the verdict itself first --
-    ``backend_signs_in_via_kiro_cli(await selected_backend(key))`` -- so a
-    ``member-*`` session is judged by the backend the factory routes it to
-    (``agent.member_acp_backend``) rather than by the gateway default.
-    For a backend outside the identity-store set this returns
-    ``None`` without consulting the service: the destructive
-    reruns and ``/v1/chat/completions`` then start their turn on that harness,
-    whose own ACP attempt is the authority for its sign-in, exactly as it is for
-    an ordinary send. On ``/v1/chat/completions`` that verdict reaches the client:
-    a turn that fails ``AcpAuthRequired`` is translated into an OpenAI-shaped 401
-    (``openai_compat._auth_required_error``), so a foreign harness's sign-in
-    failure is never an empty 200 there. The poll-driven spawn sites do NOT rely
-    on this ``None``: they test
-    the membership themselves and never resolve kiro-cli for a foreign harness,
-    because the binary may still be installed and signed out on that host and the
-    browser storm is what the spawn does, whatever the selected backend.
+    (:func:`backend_signs_in_via_kiro_cli`). *signs_in_via_kiro_cli* is the
+    caller's verdict for the session it acts on: a caller continuing a live
+    session passes that session's own verdict
+    (:func:`live_session_signs_in_via_kiro_cli`), and a caller acting for one
+    session resolves ``backend_signs_in_via_kiro_cli(await selected_backend(key,
+    state=state))`` itself, so a ``member-*`` session is judged by the backend
+    the factory routes it to. Destructive reruns pass *session_key* and *state*
+    instead at their mutation boundary, so this gate re-selects the installed
+    factory backend there. The two poll-driven spawn sites pass ``True``: they
+    spawn kiro-cli themselves whatever harness the sessions use, so the latch
+    is about their own spawn.
 
-    Every production caller passes one of *backend*, *signs_in_via_kiro_cli* or
-    *session_key* + *state* explicitly -- the bare call is for this gate's own
-    unit tests only, and
+    For a session outside the identity-store set this returns ``None`` without
+    consulting the service: the reruns and ``/v1/chat/completions`` then start
+    their turn on that harness, whose own ACP attempt is the authority for its
+    sign-in, exactly as for an ordinary send.
+
+    Every production caller passes *signs_in_via_kiro_cli* or *session_key* +
+    *state* explicitly -- the bare call is for this gate's own unit tests only,
+    and
     ``test_kiro_spawn_readiness_gate.test_every_production_caller_hands_the_gate_its_verdict_or_backend``
-    fails on a call site in the package that omits all four.
+    fails on a call site in the package that omits all three.
     """
 
     if signs_in_via_kiro_cli is None:
-        if backend is None:
-            backend = await selected_backend(session_key, state=state)
-        signs_in_via_kiro_cli = backend_signs_in_via_kiro_cli(backend)
+        signs_in_via_kiro_cli = backend_signs_in_via_kiro_cli(
+            await selected_backend(session_key, state=state)
+        )
     if signs_in_via_kiro_cli:
         if await kiro_verified_ready(_service(request), max_age_secs=max_age_secs):
             _clear_refusal_warning()

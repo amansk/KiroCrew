@@ -2571,18 +2571,19 @@ message, and no token or credential text is logged.
     the latch keeps governing — fail closed toward the gate. The two spawn sites
     do **not** rely on that `None`, because they spawn kiro-cli themselves
     whatever backend the sessions use: `/api/models` serves an advertised-selection
-    backend from `_advertised_backend_models` before any kiro-cli branch, answers
-    `model_list_backend_unsupported` 503 for a backend with neither an advertised
-    selection nor a kiro-cli sign-in, and hands the gate the backend it already
-    read; `/api/sessions/usage` and its refresh pass `signs_in_via_kiro_cli=True`,
-    so they stay gated on every backend.
+    backend from `_advertised_backend_models` before any kiro-cli branch, and its
+    kiro-cli branch, like `/api/sessions/usage` and its refresh, passes
+    `signs_in_via_kiro_cli=True`, so they stay gated on every backend and a
+    `PATCH agent.acp_backend` landing mid-request cannot make the gate stand
+    aside for a kiro-cli spawn.
     `test_kiro_spawn_readiness_gate.py::test_gate_applies_exactly_to_the_kiro_identity_store_members`
     pins the membership over every id in `ACP_BACKENDS_KNOWN`.
-  - **One backend snapshot per request.** The gate takes `backend=` from a
-    caller that already read the configured backend for its own branch
-    (`/api/models`), and reads config itself only when handed nothing. Two reads
-    are two snapshots: a `PATCH agent.acp_backend` landing between them admits
-    the kiro-cli branch on the first while the gate stands aside on the second.
+  - **A foreign rerun refuses after a signed-out turn.** With the latch out of
+    play, the one sign-in fact Crew holds for a foreign harness is the slot's own
+    last outcome. When `_last_turn_auth_required` is set, regenerate, rewind and
+    edit-resend answer `harness_sign_in_required` 503 under the slot lock,
+    before the first destructive write, instead of cutting history only to fail
+    the same way. The next ordinary send rewrites the flag when its turn ends.
   - **A caller that continues a live session gates on THAT session's backend.**
     A live session keeps the backend it was started on (a PATCH refreshes
     defaults and retires nothing in flight), and plain regenerate continues the
@@ -2600,7 +2601,9 @@ message, and no token or credential text is logged.
     `/v1/chat/completions`.** The gate stands aside for it, so the collectors
     translate the turn's end: `_last_turn_auth_required` answers the OpenAI
     `authentication_error` envelope (HTTP 401, `code: auth_required`), and any
-    other error row with no reply text answers `server_error` (HTTP 500). On a
+    other error row with no reply text answers `server_error` (HTTP 500). That
+    second rule runs on every backend, so a kiro-backed turn that fails mid-turn
+    with no reply is also a 500 now rather than an empty 200. On a
     foreign backend the streaming path prepares SSE headers on the first write,
     so a failure before any output is still a plain HTTP status.
 - **`AcpAuthRequired` is the authoritative logout signal.** Readiness is probed

@@ -39,6 +39,7 @@ from kiro_crew.dashboard.chat_utils import (
 )
 from kiro_crew.dashboard.kiro_readiness import (
     backend_signs_in_via_kiro_cli,
+    refuse_rerun_after_signed_out_turn,
     reject_if_kiro_unverified,
     selected_backend,
 )
@@ -199,6 +200,10 @@ async def api_chat_slot_rewind(request: web.Request) -> web.Response:
         stale = _reauthorize_after_await(state, slot, name, request_app, "chat.slot_rewind")
         if stale is not None:
             return stale
+        if not signs_in_via_kiro_cli:
+            signed_out = refuse_rerun_after_signed_out_turn(slot)
+            if signed_out is not None:
+                return signed_out
         if slot.running:
             return web.json_response({"error": "slot is running"}, status=409)
         if slot.is_closing:

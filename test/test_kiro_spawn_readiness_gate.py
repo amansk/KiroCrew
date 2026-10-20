@@ -57,7 +57,7 @@ _GATE_NAME = "reject_if_kiro_unverified"
 # The inputs that carry a caller's own verdict or backend into the gate. A call
 # passing none of them falls back to the gate's disk read, which is the read the
 # gate's docstring warns is wrong during watcher lag and after a hot switch.
-_GATE_INPUTS = frozenset({"backend", "signs_in_via_kiro_cli", "session_key", "state"})
+_GATE_INPUTS = frozenset({"signs_in_via_kiro_cli", "session_key", "state"})
 
 
 @pytest.fixture(autouse=True)
@@ -549,11 +549,10 @@ async def test_an_unreadable_config_keeps_the_gate(caplog: pytest.LogCaptureFixt
 
 
 @pytest.mark.asyncio
-async def test_api_models_refuses_a_foreign_backend_before_resolving_kiro_cli() -> None:
+async def test_api_models_serves_a_foreign_backend_without_resolving_kiro_cli() -> None:
     """kiro-cli's ``--list-models`` catalog is only a kiro-family answer, so a
-    foreign harness never reaches the resolver: one with an advertised model
-    selection of its own (opencode) is served that list, ``auto`` first, and one
-    with no model list at all is refused. Neither resolves or spawns the binary."""
+    foreign harness with an advertised model selection of its own (opencode) is
+    served that list, ``auto`` first, without resolving or spawning the binary."""
     request = _request(_make_signed_out_kiro_prerequisite())
     with _config_selecting(ACP_BACKEND_OPENCODE):
         with patch(_RESOLVE_TARGET, AsyncMock(return_value=_FAKE_KIRO_BIN)) as resolve:
@@ -564,16 +563,6 @@ async def test_api_models_refuses_a_foreign_backend_before_resolving_kiro_cli() 
     spawn.assert_not_called()
     assert served.status == 200
     assert json.loads(served.body)[0]["model_name"] == "auto"
-
-    with _config_selecting("harness-with-no-model-list"):
-        with patch(_RESOLVE_TARGET, AsyncMock(return_value=_FAKE_KIRO_BIN)) as resolve:
-            with patch("asyncio.create_subprocess_exec", AsyncMock()) as spawn:
-                refused = await agents.api_models(request)
-
-    resolve.assert_not_called()
-    spawn.assert_not_called()
-    assert refused.status == 503
-    assert json.loads(refused.body)["code"] == "model_list_backend_unsupported"
 
 
 @pytest.mark.asyncio
@@ -615,20 +604,20 @@ async def test_usage_refresh_on_kiro_still_honors_the_readiness_gate(
 
 
 @pytest.mark.asyncio
-async def test_an_explicit_backend_snapshot_is_used_instead_of_a_config_read() -> None:
-    """A caller's snapshot is authoritative: the gate must not read config again."""
+async def test_an_explicit_verdict_is_used_instead_of_a_config_read() -> None:
+    """A caller's verdict is authoritative: the gate must not read config again."""
     from kiro_crew.config import KiroCrewConfig
 
     def _boom(cls):
-        raise AssertionError("the gate re-read config despite being handed a backend")
+        raise AssertionError("the gate re-read config despite being handed a verdict")
 
     request = _request(_make_signed_out_kiro_prerequisite())
     with patch.object(KiroCrewConfig, "load", classmethod(_boom)):
         assert (
-            await kiro_readiness.reject_if_kiro_unverified(request, backend=ACP_BACKEND_CLAUDE)
+            await kiro_readiness.reject_if_kiro_unverified(request, signs_in_via_kiro_cli=False)
             is None
         )
-        resp = await kiro_readiness.reject_if_kiro_unverified(request, backend=ACP_BACKEND_KIRO)
+        resp = await kiro_readiness.reject_if_kiro_unverified(request, signs_in_via_kiro_cli=True)
     assert resp is not None and resp.status == 503
 
 
@@ -637,8 +626,9 @@ async def test_api_models_gates_on_its_own_snapshot_not_a_second_read() -> None:
     """A PATCH landing between the handler's read and the gate's must not admit a spawn.
 
     The handler read kiro; by the time the gate would read again the default has
-    flipped to a foreign backend. With two reads the gate stands aside and the
-    kiro-cli branch spawns unauthenticated once. With one snapshot it refuses.
+    flipped to a foreign backend. The kiro-cli branch spawns kiro-cli whatever
+    the sessions use, so it hands the gate ``signs_in_via_kiro_cli=True`` and the
+    gate refuses instead of standing aside on a second read.
     """
     request = _request(_make_signed_out_kiro_prerequisite())
     with _config_selecting(ACP_BACKEND_KIRO):
@@ -712,28 +702,50 @@ def test_every_production_caller_hands_the_gate_its_verdict_or_backend() -> None
     )
 
 
-def test_live_session_verdict_is_the_providers_own_declaration_and_nothing_else() -> None:
+@pytest.mark.asyncio
+async def test_live_session_verdict_is_the_providers_own_declaration_and_nothing_else() -> None:
+    rows = {
+        "k": SimpleNamespace(provider=SimpleNamespace(uses_kiro_identity_store=True)),
+        "f": SimpleNamespace(provider=SimpleNamespace(uses_kiro_identity_store=False)),
+    }
     live = SimpleNamespace(
-        sessions=SimpleNamespace(
-            _sessions={
-                "k": SimpleNamespace(provider=SimpleNamespace(uses_kiro_identity_store=True)),
-                "f": SimpleNamespace(provider=SimpleNamespace(uses_kiro_identity_store=False)),
-            }
-        )
+        sessions=SimpleNamespace(_sessions=rows, is_provider_alive=AsyncMock(return_value=True))
     )
-    assert kiro_readiness.live_session_signs_in_via_kiro_cli(live, "k") is True
-    assert kiro_readiness.live_session_signs_in_via_kiro_cli(live, "f") is False
-    assert kiro_readiness.live_session_signs_in_via_kiro_cli(live, "other") is None
-    assert (
-        kiro_readiness.live_session_signs_in_via_kiro_cli(
-            SimpleNamespace(sessions=MagicMock()), "k"
-        )
-        is None
-    )
+    peek = kiro_readiness.live_session_signs_in_via_kiro_cli
+    assert await peek(live, "k") is True
+    assert await peek(live, "f") is False
+    assert await peek(live, "other") is None
+    assert await peek(SimpleNamespace(sessions=MagicMock()), "k") is None
     undeclared = SimpleNamespace(
-        sessions=SimpleNamespace(_sessions={"k": SimpleNamespace(provider=SimpleNamespace())})
+        sessions=SimpleNamespace(
+            _sessions={"k": SimpleNamespace(provider=SimpleNamespace())},
+            is_provider_alive=AsyncMock(return_value=True),
+        )
     )
-    assert kiro_readiness.live_session_signs_in_via_kiro_cli(undeclared, "k") is None
+    assert await peek(undeclared, "k") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alive", [False, None, "probe-raises", "no-probe"])
+async def test_a_row_that_is_not_positively_alive_does_not_answer(alive) -> None:
+    """A dead foreign row must not answer for the kiro-cli session that replaces it.
+
+    ``get_or_create`` evicts a row whose process exited and rebuilds on the
+    installed factory, so only a manager that says the provider IS alive may
+    hand the gate that provider's declaration (red before the liveness check:
+    the dead row answered ``False`` and the gate stood aside).
+    """
+    rows = {"f": SimpleNamespace(provider=SimpleNamespace(uses_kiro_identity_store=False))}
+    if alive == "no-probe":
+        manager = SimpleNamespace(_sessions=rows)
+    elif alive == "probe-raises":
+        manager = SimpleNamespace(
+            _sessions=rows, is_provider_alive=AsyncMock(side_effect=RuntimeError("gone"))
+        )
+    else:
+        manager = SimpleNamespace(_sessions=rows, is_provider_alive=AsyncMock(return_value=alive))
+    state = SimpleNamespace(sessions=manager)
+    assert await kiro_readiness.live_session_signs_in_via_kiro_cli(state, "f") is None
 
 
 # ── A member thread is judged by the backend it is ROUTED to ─────────────────
@@ -941,7 +953,7 @@ async def test_the_live_verdict_follows_a_backend_switch_on_a_real_session_manag
         # gate must still refuse; a peek that had drifted to ``None`` would fall
         # back to the Claude default and let the rewrite through.
         with _config_selecting(ACP_BACKEND_CLAUDE):
-            verdict = kiro_readiness.live_session_signs_in_via_kiro_cli(state, _PLAIN_KEY)
+            verdict = await kiro_readiness.live_session_signs_in_via_kiro_cli(state, _PLAIN_KEY)
             assert verdict is True
             resp = await kiro_readiness.reject_if_kiro_unverified(
                 request, signs_in_via_kiro_cli=verdict
@@ -958,7 +970,7 @@ async def test_the_live_verdict_follows_a_backend_switch_on_a_real_session_manag
         manager.release(_PLAIN_KEY)
 
         with _config_selecting(ACP_BACKEND_KIRO):
-            verdict = kiro_readiness.live_session_signs_in_via_kiro_cli(state, _PLAIN_KEY)
+            verdict = await kiro_readiness.live_session_signs_in_via_kiro_cli(state, _PLAIN_KEY)
             assert verdict is False
             assert (
                 await kiro_readiness.reject_if_kiro_unverified(
@@ -1119,6 +1131,7 @@ async def test_regenerate_rechecks_an_evicted_live_foreign_session_before_trunca
     state.sessions._sessions = {
         _PLAIN_KEY: SimpleNamespace(provider=_provider_on(ACP_BACKEND_CLAUDE))
     }
+    state.sessions.is_provider_alive = AsyncMock(return_value=True)
     _set_installed_backend(state, ACP_BACKEND_KIRO)
     _evict_live_session_when_slot_lock_is_acquired(slot, state, _PLAIN_KEY)
     original = list(slot.messages)
@@ -1141,6 +1154,7 @@ async def test_regenerate_keeps_a_still_live_foreign_session_ungated(tmp_path, m
     state.sessions._sessions = {
         _PLAIN_KEY: SimpleNamespace(provider=_provider_on(ACP_BACKEND_CLAUDE))
     }
+    state.sessions.is_provider_alive = AsyncMock(return_value=True)
     _set_installed_backend(state, ACP_BACKEND_KIRO)
 
     with patch.object(chat_regenerate, "_run_chat", AsyncMock()) as run:
@@ -1247,6 +1261,48 @@ async def test_destructive_reruns_gate_on_the_installed_factory_backend(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("module", "handler", "route"),
+    [
+        (chat_regenerate, chat_regenerate.api_chat_slot_regenerate, "regenerate"),
+        (chat_regenerate, chat_regenerate.api_chat_slot_edit_resend, "edit-resend"),
+        (chat_rewind, chat_rewind.api_chat_slot_rewind, "rewind"),
+    ],
+    ids=["regenerate", "edit-resend", "rewind"],
+)
+async def test_a_foreign_rerun_after_a_signed_out_turn_refuses_before_truncating(
+    tmp_path, monkeypatch, module, handler, route: str
+) -> None:
+    """On a foreign harness the slot's own last outcome is the sign-in fact.
+
+    The kiro-cli latch stands aside, so without this the rerun would cut history
+    and then fail the same way the last turn did. With the flag clear, the same
+    request goes through: the refusal is the flag, not the backend.
+    """
+    state, slot, request = _plain_slot_request_for_installed_factory(tmp_path, monkeypatch, route)
+    _set_installed_backend(state, ACP_BACKEND_CLAUDE)
+    slot._last_turn_auth_required = True
+    original = list(slot.messages)
+
+    with _config_selecting(ACP_BACKEND_CLAUDE, member_backend=ACP_BACKEND_CLAUDE):
+        with patch.object(module, "_run_chat", AsyncMock()) as run:
+            resp = await handler(request)
+
+    assert resp.status == 503
+    assert json.loads(resp.body)["code"] == "harness_sign_in_required"
+    assert slot.messages == original
+    state.sessions.discard_conversation.assert_not_awaited()
+    run.assert_not_called()
+
+    slot._last_turn_auth_required = False
+    with _config_selecting(ACP_BACKEND_CLAUDE, member_backend=ACP_BACKEND_CLAUDE):
+        with patch.object(module, "_run_chat", AsyncMock()):
+            resp = await handler(request)
+            await asyncio.sleep(0)
+    assert resp.status == 200, resp.body
+
+
+@pytest.mark.asyncio
 async def test_rewind_does_not_gate_a_foreign_installed_factory_on_stale_kiro_config(
     tmp_path, monkeypatch
 ) -> None:
@@ -1350,6 +1406,7 @@ async def test_regenerate_reauthorizes_before_the_locked_readiness_verdict(
         _PLAIN_KEY: SimpleNamespace(provider=_provider_on(ACP_BACKEND_CLAUDE)),
         rebound_key: SimpleNamespace(provider=_provider_on(ACP_BACKEND_KIRO)),
     }
+    state.sessions.is_provider_alive = AsyncMock(return_value=True)
     _set_installed_backend(state, ACP_BACKEND_KIRO)
     _rebind_session_when_slot_lock_is_acquired(slot, rebound_key)
     original = list(slot.messages)

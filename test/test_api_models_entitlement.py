@@ -45,7 +45,6 @@ from kiro_crew.acp_backends import (
     ACP_BACKEND_OPENCODE,
     ACP_BACKEND_PI,
     ACP_BACKENDS_ADVERTISED_MODEL_SELECTION,
-    backends_retired_by_host_logout,
     model_registry_namespace,
 )
 from kiro_crew.agent_sdk.capabilities import capabilities_for
@@ -899,23 +898,6 @@ async def test_api_models_cold_foreign_backend_offers_auto_alone(
 
     assert resp.status == 200
     assert _names(json.loads(resp.body)) == ["auto"]
-
-
-@pytest.mark.asyncio
-async def test_api_models_refuses_a_backend_with_no_advertised_selection(
-    _cold_advertised_cache,
-) -> None:
-    """A selected backend outside every set that has a model list of its own is
-    refused -- kiro-cli's catalog is not its answer -- and still spawns nothing."""
-    backend = "harness-with-no-model-list"
-    assert backend not in ACP_BACKENDS_ADVERTISED_MODEL_SELECTION
-    assert backend not in backends_retired_by_host_logout()
-    model_registry.refresh_advertised_models("acp", ["claude-opus-5"])
-
-    resp = await _api_models_without_kiro_cli(backend)
-
-    assert resp.status == 503
-    assert json.loads(resp.body)["code"] == "model_list_backend_unsupported"
 
 
 @pytest.mark.asyncio
