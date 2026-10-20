@@ -48,6 +48,7 @@ from kiro_crew.acp.client import advertised_model_ids, model_is_unusable
 from kiro_crew.acp_backends import (  # noqa: F401 - selectable_backend_values is a facade name
     ACP_BACKEND_CLAUDE,
     ACP_BACKEND_KIRO,
+    backends_retired_by_host_logout,
     model_registry_namespace,
     selectable_backend_values,
     selectable_stored_backend_values,
@@ -1393,7 +1394,8 @@ async def api_models(request: web.Request) -> web.Response:
 
     kiro-family backends read kiro-cli's ``--list-models`` catalog (narrowed to a
     live session's entitlement); advertised-selection backends read their own
-    adapter's namespace, because they do not accept ids from that catalog.
+    adapter's namespace, because they do not accept ids from that catalog. Any
+    other backend is refused with a 503 before kiro-cli is spawned.
     """
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
     backend = getattr(cfg.agent, "acp_backend", "")
@@ -1406,6 +1408,23 @@ async def api_models(request: web.Request) -> web.Response:
             _advertised_backend_models(
                 request, backend, configured_default=_scoped_default(cfg, backend)
             )
+        )
+    # The list below comes from `kiro-cli chat --list-models`, so it is only an
+    # answer for a harness that signs in through kiro-cli (positive membership,
+    # harness-parity H5). Any other selected backend -- one with neither an
+    # advertised selection above nor a kiro-cli sign-in -- is refused BEFORE the
+    # binary is resolved, and deliberately not routed through the readiness gate:
+    # that gate stands aside for a foreign harness, while kiro-cli may still be
+    # installed and signed out on this host, and an unauthenticated spawn opens a
+    # browser window on every 8s poll whatever backend the sessions use.
+    if backend not in backends_retired_by_host_logout():
+        return web.json_response(
+            {
+                "error": "model list is served by kiro-cli; not available on the "
+                "selected agent backend",
+                "code": "model_list_backend_unsupported",
+            },
+            status=503,
         )
     # Signed-out gateways must never reach the spawn below. kiro-cli auto-opens
     # an interactive browser login for ANY subcommand run unauthenticated
@@ -1423,7 +1442,11 @@ async def api_models(request: web.Request) -> web.Response:
     # cooldown is the short failure backoff below, so a wide stale-authorize window
     # would still let a stale ready=True latch spawn a browser-opening login on
     # most degraded ticks.
-    blocked = await reject_if_kiro_unverified(request)
+    #
+    # The gate is handed the backend read above rather than reading its own: two
+    # reads are two snapshots, and a PATCH landing between them would admit this
+    # branch on the first while the gate stood aside on the second.
+    blocked = await reject_if_kiro_unverified(request, backend=backend)
     if blocked is not None:
         return blocked
     try:
